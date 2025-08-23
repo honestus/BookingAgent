@@ -1,3 +1,4 @@
+from bisect import bisect_left
 def get_consecutive_slots_join(slot_list, slot_list2, how='diff'):
     """
     Returns the difference/join/union of two slot lists, based on the consecutive slots that make part of such lists.

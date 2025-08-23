@@ -63,23 +63,26 @@ class Segment:
             return self.slots[idx] if not return_index else idx
         return None
 
-    def join(self, other_segment):
+    def join(self, other_segment, copy=True):
         if other_segment.slot_duration!=self.slot_duration:
             raise ValueError('Cannot join segments with different slot durations')
         # Only allow joining if segments are exactly adjacent (no gap, no overlap)
+        joined_segment = self.copy()
         if self.end_time == other_segment.start_time:
             # Merge forward
-            object.__setattr__(self, 'end_time', other_segment.end_time)
-            object.__setattr__(self, 'slots', self.slots + other_segment.slots)
+            object.__setattr__(joined_segment, 'end_time', other_segment.end_time)
+            object.__setattr__(joined_segment, 'slots', self.slots + other_segment.slots)
         elif other_segment.end_time == self.start_time:
             # Merge backward
-            object.__setattr__(self, 'start_time', other_segment.start_time)
-            object.__setattr__(self, 'slots', other_segment.slots + self.slots)
+            object.__setattr__(joined_segment, 'start_time', other_segment.start_time)
+            object.__setattr__(joined_segment, 'slots', other_segment.slots + self.slots)
         else:
             raise ValueError("Segments are not exactly adjacent. Cannot join.")
 
-        self._update_time_index_map()
-        return self
+        joined_segment._update_time_index_map()
+        if not copy:
+            self = joined_segment
+        return joined_segment
 
     def get_slots_slice(self, start_time, end_time):
         if start_time>self.end_time or end_time<self.start_time:
@@ -165,40 +168,48 @@ class Segment:
 from bisect import bisect_left, bisect_right
 
 
-class SlotsManager():
+class BusinessCalendar():
     def __init__(self, slot_minutes_duration=5):
         self.slot_minutes_duration = slot_minutes_duration
         self.segments = []
         #self._update_time_index_map()
 
 
-    def add_segment(self, start_time, end_time, force_past_slots=True):
-        new_segment = Segment(start_time=start_time, end_time=end_time, slot_duration=self.slot_minutes_duration, force_past_slots=force_past_slots)
-        
-        idx = bisect_left(self.segments, new_segment.start_time, key=lambda x: x.start_time)
+    def add_segment(self, segment):
+        idx = bisect_left(self.segments, segment.start_time, key=lambda x: x.start_time)
         # Check left neighbor no-overlaps
+        prev_elem_to_del, follow_elem_to_del = False, False
         if idx > 0:
             previous_segment = self.segments[idx-1]
-            if new_segment.start_time < previous_segment.end_time:
+            if segment.start_time < previous_segment.end_time:
                 raise ValueError(f"Overlaps with segment {previous_segment}")
-            if new_segment.start_time == previous_segment.end_time:
+            if segment.start_time == previous_segment.end_time:
                 warnings.warn(f'The new segment is adiacent with previously generated segment {previous_segment}. Will now join them as a unique segment')
-                new_segment = new_segment.join(previous_segment)
-                del self.segments[idx-1]
-                idx -= 1      
-        
+                segment = segment.join(previous_segment) 
+                prev_elem_to_del = True
+                
         # Check right neighbor no-overlaps
         if idx < len(self.segments):
             following_segment = self.segments[idx]
-            if new_segment.end_time > following_segment.start_time:
+            if segment.end_time > following_segment.start_time:
                 raise ValueError(f"Overlaps with segment {following_segment}")
-            if new_segment.end_time == following_segment.start_time:
+            if segment.end_time == following_segment.start_time:
                 warnings.warn(f'The new segment is adiacent with previously generated segment {following_segment}. Will now join them as a unique segment')
-                new_segment = new_segment.join(following_segment)
-                del self.segments[idx]
+                segment = segment.join(following_segment)
+                follow_elem_to_del = True
+                
+        if prev_elem_to_del:
+            del self.segments[idx-1]
+            idx -= 1
+        if follow_elem_to_del:
+            del self.segments[idx]
 
-        self.segments.insert(idx, new_segment)
+        self.segments.insert(idx, segment)
         return True
+        
+    def add_new_segment(self, start_time, end_time, force_past_slots=True):
+        new_segment = Segment(start_time=start_time, end_time=end_time, slot_duration=self.slot_minutes_duration, force_past_slots=force_past_slots)
+        return self.add_segment(new_segment)
 
 
     def remove_segment(self, start_time, end_time, raise_error_if_any_booking=True):
@@ -327,7 +338,7 @@ class SlotsManager():
         else:
             return list(zip(*[available_default_slots,available_special_slots]))
 
-    def lock_slots(self, sorted_slots):
+    def _lock_slots(self, sorted_slots):
         """
         Lock the given slots in a consistent order to avoid deadlocks.
         """
@@ -335,7 +346,7 @@ class SlotsManager():
             slot._lock.acquire()
         return sorted_slots  # return locked slots so caller knows what’s locked
 
-    def unlock_slots(self, sorted_slots):
+    def _unlock_slots(self, sorted_slots):
         """
         Release locks for the given slots.
         """
@@ -354,3 +365,88 @@ class SlotsManager():
         for slot in slots:
             slot.reset()
         return True
+
+
+    def join(self, other: "BusinessCalendar") -> "BusinessCalendar":
+        """
+        Merge two BusinessCalendar into a new one.
+        Raises OverlappingSegmentsError if any overlap is detected.
+        """
+        def _append(sorted_segments, new_segment): ##appends by checking adjacency
+            if len(sorted_segments) and new_segment.start_time == sorted_segments[-1].end_time: ## adjacent segment -> joining last_list_segment with current segment
+                sorted_segments[-1] = sorted_segments[-1].join(new_segment)
+            else:
+                sorted_segments.append(new_segment)
+        def _extend(sorted_segments, new_segments): ##extends by checking adjacency
+            i=0
+            if len(sorted_segments) and new_segments[0].start_time == sorted_segments[-1].end_time: ## adjacent segment -> joining last_list_segment with current segment
+                sorted_segments[-1] = sorted_segments[-1].join(new_segments[0])
+                i+=1
+            sorted_segments.extend(new_segments[i:])
+
+
+
+        if self.slot_minutes_duration != other.slot_minutes_duration:
+            raise ValueError('Slots duration mismatch. Cannot join')
+
+
+        merged = BusinessCalendar(slot_minutes_duration=self.slot_minutes_duration)
+        if not self.segments or not other.segments:
+            merged.segments = self.segments + other.segments
+            return merged
+        if self.segments[-1].end_time <= other.segments[0].start_time:
+            merged.segments = self.segments.copy()
+            _extend(merged.segments, other.segments)
+            return merged
+        if other.segments[-1].end_time <= self.segments[0].start_time:
+            merged.segments = other.segments.copy()
+            _extend(merged.segments, self.segments)
+            return merged
+
+        i,j = bisect_left(self.segments, other.segments[0].start_time, key=lambda x: x.start_time), bisect_left(other.segments, self.segments[0].start_time, key=lambda x: x.start_time)
+        if i or j:
+            last_segm_to_add = self.segments[i-1] if i>j else other.segments[j-1]
+            last_segm_to_check = other.segments[0] if i>j else self.segments[0]
+            if last_segm_to_add.end_time>last_segm_to_check.start_time:
+                raise ValueError(f"Overlap detected between {last_segm_to_add} and {last_segm_to_check}" )
+            merged.segments.extend(self.segments[:i] if i>j else other.segments[:j])
+  
+  
+        self_end_time, other_end_time = self.segments[-1].end_time, other.segments[-1].end_time
+        while i < len(self.segments) and j < len(other.segments):
+            s1, s2 = self.segments[i], other.segments[j]
+
+            # s1 before s2
+            if s1.end_time <= s2.start_time:
+     
+                if self_end_time <= s2.start_time:            # optimization: if this calendar segments are strictly before ALL remaining of other
+                    _extend(merged.segments, self.segments[i:]) # just extending current merged with all the remaining segments of this + other
+                    _extend(merged.segments, other.segments[j:])
+                    return merged
+                        
+                i+=1
+                _append(merged.segments, s1)
+
+
+            # s2 before s1
+            elif s2.end_time <= s1.start_time:
+                
+                if other_end_time <= s1.start_time:            # optimization: if other calendar segments are strictly before ALL remaining of self segments
+                    _extend(merged.segments, other.segments[j:]) # just extending current merged with all the remaining segments of other + this
+                    _extend(merged.segments, self.segments[i:])
+                    return merged
+                
+                j+=1
+                _append(merged.segments, s2)
+
+            # overlap
+            else:
+                raise ValueError(f"Overlap detected between {s1} and {s2}" )
+
+        # append remaining elements if one list is exhausted
+        if i < len(self.segments):
+            _extend(merged.segments, self.segments[i:])
+        if j < len(other.segments):
+            _extend(merged.segments, other.segments[j:])
+
+        return merged

@@ -27,7 +27,7 @@ class PolicyError(Exception):
         super().__init__(self.message)
 
 class PastTimeError(Exception):
-    """Exception raised for any action that tries to modify bookings on past times.
+    """Exception raised for any action that tries to modify bookings related to past times.
     """
     def __init__(self, message):
         self.message = message
