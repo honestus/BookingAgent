@@ -1,9 +1,9 @@
 import datetime
 class Service():
-    def __init__(self, name, price, minutes_duration, minutes_grid_span=None):
-        self.price=price
-        self.minutes_duration=self.__validate_duration__(minutes_duration)
-        self.minutes_grid_span=minutes_grid_span or 15
+    def __init__(self, name, price, minutes_duration, description=''):
+        self.price = price
+        self.minutes_duration = self.__validate_duration__(minutes_duration)
+        self.description = description
         object.__setattr__(self, 'name', name)
 
 
@@ -11,10 +11,10 @@ class Service():
         self.price = price
 
     def set_duration(self,minutes_duration):
-        self.minutes_duration = self.__validate_duration__(duration)
+        self.minutes_duration = self.__validate_duration__(minutes_duration)
 
-    def set_minutes_grid_span(self,minutes_grid_span):
-        self.minutes_grid_span = minutes_grid_span
+    def set_description(self, description):
+        self.description = description
 
     def __validate_duration__(self, minutes_duration):
         if minutes_duration%5:
@@ -29,7 +29,7 @@ class Service():
         super().__setattr__(attribute, value)
 
     def __repr__(self):
-        return f"Service: {self.name}. Price: {self.price}. Duration: {self.minutes_duration}"
+        return f"Service: {self.name}. Price: {self.price}. Duration: {self.minutes_duration} mins." + (f"\n{self.description}" if self.description else '')
 
 
 class PolicyManager():
@@ -57,16 +57,17 @@ class PolicyManager():
         self.services = {s:self.services[s] for s in self.services if s!=service_name}
         self.set_default_slot_duration()
 
-    def update_service(self,service_name, service_price=None, service_duration=None, minutes_grid_span=None):
+    def update_service(self, service_name, price=None, minutes_duration=None, description=None):
         if service_name not in self.services:
             raise ValueError('Service not in current services')
-        if all(el is None for el in [service_price, service_duration, minutes_grid_span]):
-            raise ValueError('Nothing to update.')
+        if all(el is None for el in [price, minutes_duration, description]):
+            return #raise ValueError('Nothing to update.')
         curr_service = self.services[service_name]
-        if service_price is not None:
-            curr_service.price=service_price
-        if minutes_grid_span is not None:
-            curr_service.minutes_grid_span=minutes_grid_span
-        if service_duration is not None:
-            curr_service.minutes_duration=service_duration
-            self.calculate_default_slot_duration()
+        if price is not None:
+            curr_service.set_price(price)
+        if minutes_duration is not None:
+            curr_service.set_duration(minutes_duration)
+            self.set_default_slot_duration()
+        if description is not None:
+            curr_service.set_description(description)
+        

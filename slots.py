@@ -1,5 +1,5 @@
 import math, warnings, copy, threading, datetime
-from datetime import timedelta, date as datetime_date
+from datetime import timedelta
 from booking_errors import AlreadyBookedError
 class Slot:
     def __init__(self, start_time: datetime):
@@ -287,7 +287,7 @@ class SlotsManager():
         start_time: filtering start_time - will only look for slots after it.
         end_time: filtering end_time - will only look for slots before it.
         """
-        from utils import validate_time
+        from datetimes_utils import validate_time
         min_start_time = validate_time(min_start_time)
         if max_start_time is None:
             max_start_time = min_start_time + timedelta(days=7)
