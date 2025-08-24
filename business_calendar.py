@@ -2,9 +2,9 @@ import math, warnings, copy, threading, datetime
 from datetime import timedelta
 from booking_errors import AlreadyBookedError
 class Slot:
-    def __init__(self, start_time: datetime):
+    def __init__(self, start_time: datetime, is_booked: bool = False):
         self.start_time = start_time  # datetime or "HH:MM" string
-        self.is_booked = False
+        self.is_booked = is_booked
         self._lock = threading.Lock()  # Only locks THIS slot
         
     def __repr__(self):
@@ -16,7 +16,8 @@ class Slot:
         return self
         
     def copy(self):
-        return copy.copy(self)
+        slot = Slot(start_time=self.start_time, is_booked=self.is_booked)
+        return slot
     
     """
     def to_dict(self):
@@ -54,11 +55,11 @@ class Segment:
     
     def _update_time_index_map(self):
         time_index_map = {slot.start_time:i for i,slot in enumerate(self.slots)}
-        object.__setattr__(self, 'time_index_map', time_index_map)
+        object.__setattr__(self, '__time_index_map__', time_index_map)
 
     def get_slot(self, start_time, return_index=False):
         """Get a slot by datetime (O(1) lookup)."""
-        idx = self.time_index_map.get(start_time)
+        idx = self.__time_index_map__.get(start_time)
         if idx is not None:
             return self.slots[idx] if not return_index else idx
         return None
@@ -71,11 +72,11 @@ class Segment:
         if self.end_time == other_segment.start_time:
             # Merge forward
             object.__setattr__(joined_segment, 'end_time', other_segment.end_time)
-            object.__setattr__(joined_segment, 'slots', self.slots + other_segment.slots)
+            object.__setattr__(joined_segment, 'slots', [s.copy() for s in self.slots] + [s.copy() for s in other_segment.slots])
         elif other_segment.end_time == self.start_time:
             # Merge backward
             object.__setattr__(joined_segment, 'start_time', other_segment.start_time)
-            object.__setattr__(joined_segment, 'slots', other_segment.slots + self.slots)
+            object.__setattr__(joined_segment, 'slots', [s.copy() for s in other_segment.slots] + [s.copy() for s in self.slots])
         else:
             raise ValueError("Segments are not exactly adjacent. Cannot join.")
 
@@ -88,8 +89,8 @@ class Segment:
         if start_time>self.end_time or end_time<self.start_time:
             return []
         # Find start index
-        if start_time in self.time_index_map:
-            start_idx = self.time_index_map[start_time]
+        if start_time in self.__time_index_map__:
+            start_idx = self.__time_index_map__[start_time]
         else:
             start_idx = bisect_left(self.slots, start_time, key=lambda s: s.start_time)
         # Find end index (exclusive)
@@ -121,7 +122,9 @@ class Segment:
         return int(minutes_from_start % default_minutes_grid_range)
         
     def copy(self):
-        return copy.copy(self)
+        other = copy.copy(self)
+        object.__setattr__(other, 'slots', [s.copy() for s in other.slots])
+        return other
         
     def __repr__(self):
         return f"<Segment - from {self.start_time} to {self.end_time}. Contains {len(self.slots)} slots)>"
@@ -366,6 +369,10 @@ class BusinessCalendar():
             slot.reset()
         return True
 
+    def copy(self):
+        calendar = BusinessCalendar(self.slot_minutes_duration)
+        calendar.segments = [segment.copy() for segment in self.segments]
+        return calendar
 
     def join(self, other: "BusinessCalendar") -> "BusinessCalendar":
         """
@@ -391,37 +398,38 @@ class BusinessCalendar():
 
 
         merged = BusinessCalendar(slot_minutes_duration=self.slot_minutes_duration)
-        if not self.segments or not other.segments:
-            merged.segments = self.segments + other.segments
+        self_copy, other_copy = self.copy(), other.copy()
+        if not self_copy.segments or not other_copy.segments:
+            merged.segments = self_copy.segments + other_copy.segments
             return merged
-        if self.segments[-1].end_time <= other.segments[0].start_time:
-            merged.segments = self.segments.copy()
-            _extend(merged.segments, other.segments)
+        if self_copy.segments[-1].end_time <= other_copy.segments[0].start_time:
+            merged.segments = self_copy.segments
+            _extend(merged.segments, other_copy.segments)
             return merged
-        if other.segments[-1].end_time <= self.segments[0].start_time:
-            merged.segments = other.segments.copy()
-            _extend(merged.segments, self.segments)
+        if other_copy.segments[-1].end_time <= self_copy.segments[0].start_time:
+            merged.segments = other_copy.segments.copy()
+            _extend(merged.segments, self_copy.segments)
             return merged
 
-        i,j = bisect_left(self.segments, other.segments[0].start_time, key=lambda x: x.start_time), bisect_left(other.segments, self.segments[0].start_time, key=lambda x: x.start_time)
+        i,j = bisect_left(self_copy.segments, other_copy.segments[0].start_time, key=lambda x: x.start_time), bisect_left(other_copy.segments, self_copy.segments[0].start_time, key=lambda x: x.start_time)
         if i or j:
-            last_segm_to_add = self.segments[i-1] if i>j else other.segments[j-1]
-            last_segm_to_check = other.segments[0] if i>j else self.segments[0]
+            last_segm_to_add = self_copy.segments[i-1] if i>j else other_copy.segments[j-1]
+            last_segm_to_check = other_copy.segments[0] if i>j else self_copy.segments[0]
             if last_segm_to_add.end_time>last_segm_to_check.start_time:
                 raise ValueError(f"Overlap detected between {last_segm_to_add} and {last_segm_to_check}" )
-            merged.segments.extend(self.segments[:i] if i>j else other.segments[:j])
+            _extend(merged.segments, self_copy.segments[:i] if i>j else other_copy.segments[:j])
   
   
-        self_end_time, other_end_time = self.segments[-1].end_time, other.segments[-1].end_time
-        while i < len(self.segments) and j < len(other.segments):
-            s1, s2 = self.segments[i], other.segments[j]
+        self_end_time, other_end_time = self_copy.segments[-1].end_time, other_copy.segments[-1].end_time
+        while i < len(self_copy.segments) and j < len(other_copy.segments):
+            s1, s2 = self_copy.segments[i], other_copy.segments[j]
 
             # s1 before s2
             if s1.end_time <= s2.start_time:
      
                 if self_end_time <= s2.start_time:            # optimization: if this calendar segments are strictly before ALL remaining of other
-                    _extend(merged.segments, self.segments[i:]) # just extending current merged with all the remaining segments of this + other
-                    _extend(merged.segments, other.segments[j:])
+                    _extend(merged.segments, self_copy.segments[i:]) # just extending current merged with all the remaining segments of this + other
+                    _extend(merged.segments, other_copy.segments[j:])
                     return merged
                         
                 i+=1
@@ -431,9 +439,9 @@ class BusinessCalendar():
             # s2 before s1
             elif s2.end_time <= s1.start_time:
                 
-                if other_end_time <= s1.start_time:            # optimization: if other calendar segments are strictly before ALL remaining of self segments
-                    _extend(merged.segments, other.segments[j:]) # just extending current merged with all the remaining segments of other + this
-                    _extend(merged.segments, self.segments[i:])
+                if other_end_time <= s1.start_time:            # optimization: if other' calendar segments are strictly before ALL remaining of self segments
+                    _extend(merged.segments, other_copy.segments[j:]) # just extending current merged with all the remaining segments of other + this
+                    _extend(merged.segments, self_copy.segments[i:])
                     return merged
                 
                 j+=1
@@ -444,9 +452,9 @@ class BusinessCalendar():
                 raise ValueError(f"Overlap detected between {s1} and {s2}" )
 
         # append remaining elements if one list is exhausted
-        if i < len(self.segments):
-            _extend(merged.segments, self.segments[i:])
-        if j < len(other.segments):
-            _extend(merged.segments, other.segments[j:])
+        if i < len(self_copy.segments):
+            _extend(merged.segments, self_copy.segments[i:])
+        if j < len(other_copy.segments):
+            _extend(merged.segments, other_copy.segments[j:])
 
         return merged
