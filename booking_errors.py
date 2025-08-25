@@ -32,3 +32,10 @@ class PastTimeError(Exception):
     def __init__(self, message):
         self.message = message
         super().__init__(self.message)
+        
+class InvalidTimeError(Exception):
+    """Exception raised for any action on irregular datetimes, e.g. booking at 11:43.
+    """
+    def __init__(self, message):
+        self.message = message
+        super().__init__(self.message)
