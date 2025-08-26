@@ -57,15 +57,15 @@ class ReservationManager:
     def generate_new_reservation_id(self):
         return str(uuid.uuid4())
         
-    def can_reserve(self, start_time: datetime.datetime, minutes_duration: int, user: str=None, force_default_grid: bool=True):
+    def can_reserve(self, start_time: datetime.datetime, minutes_duration: int, user: str=None, force_default_grid: bool=True, force_advance_reservation: bool=False):
         """Returns True if the slots are free, False otherwise.
         Including user as a parameter as, in the future, future checks on the user might be added (e.g. only limit to max n active reservations by user)
         """
-        time_constraints = {'min_reserve_minutes':self.policy_manager.min_advance_booking_minutes}
+        time_constraints = {'min_reserve_minutes':self.policy_manager.min_advance_booking_minutes * int(not force_advance_reservation)}
         
-        valid_times = check_new_reservation_constraints(start_time=start_time, end_time=start_time+timedelta(minutes=minutes_duration), **time_constraints)
-        if not valid_times[0]:
-            return False, PolicyError(valid_times[1])
+        valid_times, msg = check_new_reservation_constraints(start_time=start_time, end_time=start_time+timedelta(minutes=minutes_duration), **time_constraints)
+        if not valid_times:
+            return False, PolicyError(msg)
         grid_params = {}
         if not force_default_grid:
             grid_params = {'minutes_grid_span':5}
@@ -79,9 +79,9 @@ class ReservationManager:
     def _can_cancel_reservation(self, reservation: Reservation, user: str):
         if reservation is None or reservation.user!=user:
             return False, NotPreviouslyBookedError('')
-        valid_times = check_cancel_reservation_constraints(reservation_start_time=reservation.start_time, min_cancel_minutes=self.policy_manager.min_advance_cancelation_minutes)
-        if not valid_times[0]:
-            return False, PolicyError(valid_times[1])
+        valid_times, msg = check_cancel_reservation_constraints(reservation_start_time=reservation.start_time, min_cancel_minutes=self.policy_manager.min_advance_cancelation_minutes)
+        if not valid_times:
+            return False, PolicyError(msg)
         return True, ''
         
     def can_cancel(self, user: str, reservation_id: str = None, reservation_start_time: datetime.datetime = None):
@@ -94,7 +94,7 @@ class ReservationManager:
             reservation = self.get_reservation(reservation_id)
         return self._can_cancel_reservation(reservation=reservation, user=user)
         
-    def can_update(self, user: str, new_start_time: datetime.datetime, new_minutes_duration: int, old_reservation_id: str = None, old_start_time: datetime.datetime = None, ):
+    def can_update(self, user: str, new_start_time: datetime.datetime, new_minutes_duration: int, old_reservation_id: str = None, old_start_time: datetime.datetime = None, force_default_grid: bool = True):
         from datetimes_utils import minutes_between
         if bool(old_reservation_id) == bool(old_start_time):
             raise ValueError('Must provide exactly one between reservation_id and reservation_start_time')
@@ -106,18 +106,49 @@ class ReservationManager:
         
         if reservation is None or reservation.user!=user:
             return False, NotPreviouslyBookedError('')
-        if reservation.start_time==new_start_time:
-            if new_minutes_duration<=minutes_between(reservation.start_time, reservation.end_time):
+            
+        update_valid_times, msg = check_update_constraints(old_start_time=reservation.start_time, 
+                                        old_end_time=reservation.end_time, 
+                                        new_start_time=new_start_time, 
+                                        new_end_time=new_start_time+timedelta(minutes=new_minutes_duration), 
+                                        min_cancel_minutes=self.policy_manager.min_advance_cancelation_minutes, 
+                                        min_reserve_minutes=self.policy_manager.min_advance_booking_minutes)
+        if not update_valid_times:
+            return False, PolicyError(msg)
+        
+        if reservation.start_time==new_start_time: ##NEW RES HAS SAME START TIME OF THE OLD ONE
+            if new_minutes_duration<=minutes_between(reservation.start_time, reservation.end_time): ##new reservation lasts less than previous (i.e. needs less slots)
                 return True, ''
             return self.can_reserve(start_time=reservation.end_time, 
                                     minutes_duration=new_minutes_duration-minutes_between(reservation.start_time, reservation.end_time),
-                                    force_default_grid=False)
-        bool_cancel = self._can_cancel_reservation(reservation=reservation, user=user)
-        if not bool_cancel[0]:
-            return bool_cancel
-        raise NotImplementedError('Current case: can cancel, need to reserve on new requested datetime. To do so: must check that the new reservation starts from a valid time(grid) and all the needed slots are not booked... Basically the same as get_available_slots with slot grid but with the risk that the slots are already booked by this same reservation')
-                
+                                    force_default_grid=False,
+                                    force_advance_reservation=True) ##new reservation is longer than previous... need to check that the following needed slots are free
         
+        if new_start_time>=reservation.end_time or new_start_time+timedelta(minutes=new_minutes_duration)<=reservation.start_time: ## no overlap->just handle as new reservation
+            return self.can_reserve(start_time=new_start_time, 
+                                    minutes_duration=new_minutes_duration,
+                                    force_default_grid=force_default_grid
+                                    )
+        ### OVERLAP (NEW RESERVATION TIMES OVERLAP WITH OLD RESERVATION TIMES)
+         ##since the two reservations overlap, the only involved segment will be the one containing the new reservation
+        segment_involved = self.calendar.find_segment_containing(start_time=new_start_time, end_time=new_start_time+timedelta(minutes=new_minutes_duration), return_index=False)
+        if segment_involved is None:
+            return False, ClosingTimeError('')
+        tmp_calendar = BusinessCalendar(slot_minutes_duration=self.calendar.slot_minutes_duration)
+        tmp_calendar.add_segment(segment_involved.copy()) ##generating tmp_calendar made by only the involved segment (copy)
+        old_res_slots = tmp_calendar.get_slots(start_time=reservation.start_time, end_time=reservation.end_time)
+        tmp_calendar.free_slots(old_res_slots) ##mimicking the cancelation of old_res slots in order to check if the new reservation is available
+        grid_params = {}
+        if not force_default_grid:
+            grid_params = {'minutes_grid_span':5}
+        available_slot_grids = tmp_calendar.get_available_booking_slots(min_start_time=new_start_time, max_start_time=new_start_time, 
+                                                                         minutes_duration=new_minutes_duration, 
+                                                                         **grid_params)
+        if len(available_slot_grids)!=1 or not any(available_slot_grids[0]):
+            return False, AlreadyBookedError('')
+        return True, ''
+            
+
     def make_reservation(self, service_name: str, start_time: datetime.datetime, user: str, minutes_duration: int=None, force_past_slots: bool=False, force_advance_reservation: bool=False, force_default_grid: bool=True, ):
         if force_past_slots:
             force_advance_reservation=True
@@ -437,14 +468,14 @@ def check_cancel_reservation_constraints(reservation_start_time, min_cancel_minu
     return True, ""
         
 def check_update_constraints(old_start_time, old_end_time, new_start_time, new_end_time, min_cancel_minutes, min_reserve_minutes):
-    too_close_to_cancel = check_cancel_reservation_constraints(reservation_start_time=old_start_time, min_cancel_minutes=min_cancel_minutes)    
-    if too_close_to_cancel:
+    valid_cancel_time, _ = check_cancel_reservation_constraints(reservation_start_time=old_start_time, min_cancel_minutes=min_cancel_minutes)    
+    if not valid_cancel_time:
         # Can only change end time or service, not start time
         if new_start_time != old_start_time:
             return False, "Too late to update booking start_time."
     else:
-        too_close_to_book = check_new_reservation_constraints(start_time=new_start_time, end_time=new_end_time, min_reserve_minutes=min_reserve_minutes)
+        valid_reserv_output = check_new_reservation_constraints(start_time=new_start_time, end_time=new_end_time, min_reserve_minutes=min_reserve_minutes)
         # Treat like a new booking: must respect min_reserve_minutes
-        return too_close_to_book
+        return valid_reserv_output
     
     return True, ""
