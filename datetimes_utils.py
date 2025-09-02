@@ -57,4 +57,4 @@ def minutes_between(previous_time: datetime, following_time: datetime) -> float:
     Can be negative if following_time is earlier than previous_time.
     """
     delta = following_time - previous_time
-    return delta.total_seconds() / 60
+    return math.ceil(delta.total_seconds() / 60)
