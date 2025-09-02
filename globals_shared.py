@@ -1,0 +1,6 @@
+METHOD_ATTRIBUTE = 'method'
+PARAMS_ATTRIBUTE = 'params'
+MISSING_PARAMS_ATTRIBUTE = 'missing_params'
+USER_ATTRIBUTE = 'user'
+REPLY_ATTRIBUTE = 'reply_to_user'
+IS_CONFIRMED = 'confirm'
