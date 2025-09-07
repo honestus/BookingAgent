@@ -1,26 +1,46 @@
 import datetime
 from collections import defaultdict
 
+CONFIRMED_STATUS = 'confirmed'
+PENDING_CONFIRMATION_STATUS = 'book_noconfirm'
+PENDING_CANCELATION_STATUS = 'delete_noconfirm'
+PENDING_UPDATE_STATUS = 'update_noconfirm'
+DELETED_STATUS = 'deleted'
 class Reservation:
-    def __init__(self, reservation_id: str, user: str, start_time: datetime.datetime, end_time: datetime.datetime, service_name: str):
+    def __init__(self, reservation_id: str, user: str, start_time: datetime.datetime, end_time: datetime.datetime, service_name: str, status: str = None, is_confirmed: bool = True):
         object.__setattr__(self, 'reservation_id', reservation_id)
         object.__setattr__(self, 'user', user)
         object.__setattr__(self, 'start_time', start_time)
         object.__setattr__(self, 'end_time', end_time)
         object.__setattr__(self, 'service_name', service_name)
+        object.__setattr__(self, 'status', status)
+        object.__setattr__(self, 'is_confirmed', is_confirmed)
+        object.__setattr__(self, 'timestamp', datetime.datetime.now())
+        object.__setattr__(self, 'status_change_timestamp', self.timestamp)
+
+
 
     def __setattr__(self, attribute, value):
-        raise ValueError(f'Cannot set attribute {attribute}. It is final')
+        if attribute in ['reservation_id', 'user', 'start_time', 'end_time', 'service_name', 'timestamp']:
+            raise ValueError(f'Cannot set attribute {attribute}. It is final')
+        if attribute=='status':
+            object.__setattr__(self, 'status_change_timestamp', datetime.datetime.now())
+        return object.__setattr__(self, attribute, value)
 
     def to_dict(self):
         return self.__dict__
 
     def __repr__(self):
         self_dct = self.to_dict()
-        rep_str = ' - '.join(f'{k} = {v}' for k,v in self_dct.items() if k not in ['start_time', 'end_time'])
+        rep_str = f"reservation_id = {self.reservation_id} - " if self.reservation_id else ""
+        rep_str += ' - '.join(f'{k} = {v}' for k,v in self_dct.items() if k in ['service_name', 'user'])
         rep_str += f". From {self_dct['start_time']} to {self_dct['end_time']}" 
         return rep_str
-
+        
+    def __eq__(self, other):
+        if not isinstance(other, Reservation):
+            return False
+        return not any(getattr(self, attribute)!=getattr(other, attribute) for attribute in ['reservation_id', 'user', 'service_name', 'start_time', 'end_time', 'timestamp'])
 
 
 class ReservationManager:
