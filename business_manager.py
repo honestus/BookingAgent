@@ -283,8 +283,7 @@ class BusinessManager:
     def update_reservation(self, user: str, old_reservation_id: str, new_start_time: datetime.datetime=None, new_service_name: str=None, new_minutes_duration: int=None, force_past_slots: bool=False, force_advance_cancelation: bool=False, force_advance_reservation=False):
         from slots_utils import get_consecutive_slots_join
 
-        if new_start_time is None and new_service_name is None and new_minutes_duration is None:
-            return
+        
                 
         old_reservation = self.reservation_manager.get_reservation(old_reservation_id)
         if old_reservation is None or old_reservation.user != user:
@@ -295,6 +294,8 @@ class BusinessManager:
         validated_missing_params = self.__validate_missing_data__(old_reservation=old_reservation, start_time=new_start_time, service_name=new_service_name, minutes_duration=new_minutes_duration)
         new_start_time, new_service_name, new_minutes_duration = validated_missing_params['start_time'], validated_missing_params['service_name'], validated_missing_params['minutes_duration']
         new_end_time = new_start_time+timedelta(minutes=new_minutes_duration)
+        if old_service==new_service_name and old_start_time==new_start_time and old_end_time==new_end_time:
+            return ValueError('Nothing to update. The new reservation parameters are the same as the old one')
 
         new_start_time = validate_time(new_start_time)
         if not new_start_time:
@@ -514,7 +515,9 @@ class BusinessManagerWithConfirmation(BusinessManager):
     def __init__(self, reservation_manager: ReservationManager, calendar: BusinessCalendar, policy_manager: PolicyManager, default_grid_minutes: int=15, max_confirmation_minutes: int=15):
         super().__init__(reservation_manager=reservation_manager, calendar=calendar, policy_manager=policy_manager, default_grid_minutes=default_grid_minutes)
         self.max_confirmation_minutes = max_confirmation_minutes
-        
+        self.__updates_reservations__ = {}
+
+
     
     def cancel_all_not_confirmed_reservations(self, user: str=None, expired_only: bool=False):
         all_reservations = self.get_all_reservations() if user is None else self.get_user_reservations(user)
@@ -527,6 +530,9 @@ class BusinessManagerWithConfirmation(BusinessManager):
                 reservation.status = DELETED_STATUS 
             except Exception as e: ##only happens if cancel fails... should never happen
                 raise e
+        all_not_confirmed_updates = [self.reservation_manager.get_reservation(r_id) for r_id in self.__updates_reservations__ if not expired_only or datetime.datetime.now() - self.__updates_reservations__[r_id] > timedelta(minutes=self.max_confirmation_minutes)]
+        for reservation in all_not_confirmed_updates:
+            self.__cancel_unconfirmed_inner_update__(reservation)
         return True
             
     
@@ -591,6 +597,8 @@ class BusinessManagerWithConfirmation(BusinessManager):
         validated_params = self.__validate_missing_data__(old_reservation=old_reservation, start_time=new_start_time, service_name=new_service_name, minutes_duration=new_minutes_duration)
         validated_params['end_time'] = validated_params['start_time'] + timedelta(minutes=validated_params['minutes_duration'])
         new_start_time, new_end_time, new_service_name, new_minutes_duration = validated_params['start_time'], validated_params['end_time'], validated_params['service_name'], validated_params.pop('minutes_duration')
+        if old_reservation.service_name==new_service_name and old_reservation.start_time==new_start_time and old_reservation.end_time==new_end_time:
+            return ValueError('Nothing to update. The new reservation parameters are the same as the old one')
         new_res_slots = self.calendar.get_slots(start_time=new_start_time, end_time=new_end_time, same_segment_only=True)
         old_res_slots = self.calendar.get_slots(start_time=old_reservation.start_time, end_time=old_reservation.end_time, same_segment_only=True)
         if not new_res_slots or not old_res_slots:
@@ -622,10 +630,10 @@ class BusinessManagerWithConfirmation(BusinessManager):
         except:
             prev_update_res_slots = []
             
-        slots_to_book = get_consecutive_slots_join(get_consecutive_slots_join(slot_list=new_res_slots, slot_list2=old_res_slots, how='diff')[0],
+        slots_to_book = get_consecutive_slots_join(get_consecutive_slots_join(new_res_slots, old_res_slots, how='diff')[0],
                                               prev_update_res_slots, 
                                               how='diff')[0]
-        slots_to_free = get_consecutive_slots_join(get_consecutive_slots_join(slot_list=prev_update_res_slots, slot_list2=old_res_slots, how='diff')[0],
+        slots_to_free = get_consecutive_slots_join(get_consecutive_slots_join(prev_update_res_slots, old_res_slots, how='diff')[0],
                                               new_res_slots, 
                                               how='diff')[0]
         try:
@@ -638,6 +646,7 @@ class BusinessManagerWithConfirmation(BusinessManager):
             new_reservation = Reservation(reservation_id=__generate_new_reservation_id__(), user=user, start_time=new_start_time, end_time=new_end_time, service_name=new_service_name, status=PENDING_CONFIRMATION_STATUS, is_confirmed=False)
             old_reservation.status = PENDING_UPDATE_STATUS
             old_reservation.update_reservation = new_reservation ###setting the new reservation as a parameter within the old one. This way the system will create it 
+            self.__updates_reservations__[old_reservation.reservation_id] = new_reservation.timestamp
             return (old_reservation, new_reservation)
         except:
             return AlreadyBookedError('Cannot update. The requested time is not available for booking')
@@ -703,7 +712,7 @@ class BusinessManagerWithConfirmation(BusinessManager):
    
         if operation == 'update':
             if not isinstance(getattr(reservation, 'update_reservation', None), Reservation):
-                raise ConfirmationError('Cannot update. No update associated')
+                raise ConfirmationError('Cannot confirm update. No update associated')
             
         
         final_status, feasible_current_statuses = allowed_statuses[operation]
@@ -727,6 +736,7 @@ class BusinessManagerWithConfirmation(BusinessManager):
                     self.confirm_operation(user=user, reservation=reservation.update_reservation, operation='reserve') ##setting the status as 'confirmed' to the new reservation
                     self.reservation_manager.__insert_reservation_mapping__(reservation.update_reservation) ###inserting the new update reservation among reservations
                     self.reservation_manager.__remove_reservation_mapping__(reservation) ##removing old ones
+                    self.__updates_reservations__.pop(old_reservation.reservation_id)
                 finally:
                     self.calendar._unlock_slots(slots_to_free)
                 
@@ -757,4 +767,25 @@ class BusinessManagerWithConfirmation(BusinessManager):
         return reservation
         
             
-    
+    def __cancel_unconfirmed_inner_update__(self, reservation: Reservation):
+        from slots_utils import get_consecutive_slots_join
+
+        requested_update_reservation = getattr(reservation, 'update_reservation', None)
+        if requested_update_reservation is None:
+            return 
+        res_slots = self.calendar.get_slots(start_time=reservation.start_time, end_time=reservation.end_time, same_segment_only=True)
+        update_res_slots = self.calendar.get_slots(start_time=requested_update_reservation.start_time, end_time=requested_update_reservation.end_time, same_segment_only=True)
+        
+        slots_to_free = get_consecutive_slots_join(update_res_slots, res_slots, how='diff')[0]
+        try:
+            self.calendar._lock_slots(slots_to_free)
+            self.calendar.free_slots(slots_to_free) ##releasing old reservation slots -- NO NEED TO BOOK NEW SLOTS. IT WAS ALREADY DONE AT THE PREVIOUS REQUEST
+            reservation.update_reservation = None
+            if reservation.status == PENDING_UPDATE_STATUS:
+                reservation.status = CONFIRMED_STATUS
+            self.__updates_reservations__.pop(reservation.reservation_id)
+        except Exception as e:
+            raise e
+        finally:
+            self.calendar._unlock_slots(slots_to_free)
+        return True
