@@ -31,13 +31,11 @@ def check_update_constraints(old_start_time, old_end_time, new_start_time, new_e
         # Can only change end time or service, not start time
         if new_start_time != old_start_time:
             return False, "Too late to update booking start_time."
-    else:
-        valid_reserv_output = check_new_reservation_constraints(start_time=new_start_time, end_time=new_end_time, min_reserve_minutes=min_reserve_minutes)
-        # Treat like a new booking: must respect min_reserve_minutes
-        return valid_reserv_output
-    
-    return True, ""
-    
+        
+    # Treat like a new booking: must respect min_reserve_minutes
+    valid_reserv_output = check_new_reservation_constraints(start_time=new_start_time, end_time=new_end_time, min_reserve_minutes=min_reserve_minutes)
+    return valid_reserv_output
+        
     
 def __generate_new_reservation_id__():
         return str(uuid.uuid4())
@@ -153,7 +151,6 @@ class BusinessManager:
         segment_involved = self.calendar.find_segment_containing(start_time=new_start_time, end_time=new_end_time, return_index=False)
         if segment_involved is None:
             return ClosingTimeError('Out of working hours')
-        print('qui da can update')
         tmp_calendar = BusinessCalendar(slot_minutes_duration=self.calendar.slot_minutes_duration)
         tmp_calendar.add_segment(segment_involved.copy()) ##instantiating a new calendar made by only the involved segment (copy)
         old_res_slots = tmp_calendar.get_slots(start_time=reservation.start_time, end_time=reservation.end_time)
@@ -190,38 +187,33 @@ class BusinessManager:
             if not valid_reserve_times:
                 return PolicyError(f'Cannot reserve the reservation: Too late to reserve. Reservations must be requested at least {self.policy_manager.min_advance_booking_minutes} minutes before the start of the reservation.')
 
+        new_reservation = Reservation(reservation_id=__generate_new_reservation_id__(), 
+                                      user=user, service_name=service_name,
+                                      start_time=start_time, end_time=end_time)
+        return self._make_reservation(new_reservation)
         
         
-        slots_to_book = self.calendar.get_slots(start_time=start_time, end_time=end_time, same_segment_only=True)
+        
+    def _make_reservation(self, reservation: Reservation):
+        slots_to_book = self.calendar.get_slots(start_time=reservation.start_time, end_time=reservation.end_time, same_segment_only=True)
         if not slots_to_book:
             return ClosingTimeError('Cannot make the reservation: Out of working hours')
+        
         try:
             self.calendar._lock_slots(slots_to_book)
             self.calendar.reserve_slots(slots=slots_to_book)
-            reservation_id = __generate_new_reservation_id__()
-            new_reservation = Reservation(reservation_id=reservation_id, user=user, 
-                                          service_name=service_name,
-                                          start_time=start_time, end_time=end_time)
-            self.reservation_manager.__insert_reservation_mapping__(new_reservation)
-            return new_reservation
-
+            self.reservation_manager.__insert_reservation_mapping__(reservation)
+            return reservation
         except Exception as e:
             err_msg = 'Cannot make the reservation: ' + e.message
             return type(e)(err_msg)
-        
         finally:
             self.calendar._unlock_slots(slots_to_book)
-        
 
     def cancel_reservation(self, reservation_id: str, user: str, force_past_slots: bool=False, force_advance_cancelation: bool=False):
-        if force_past_slots:
-            force_advance_cancelation=True
-        try:
-            reservation = self.reservation_manager.reservations_id_mappings[reservation_id]
-            booked_user, booked_service, booked_start_time, booked_end_time = reservation.user, reservation.service_name, reservation.start_time, reservation.end_time
-        except KeyError:
-            return NotPreviouslyBookedError(f'Cannot cancel the reservation: You dont have any reservation with booking id: {reservation_id}')
-        if booked_user!=user:
+        reservation = self.find_reservation(reservation_id=reservation_id, user=user)
+
+        if not isinstance(reservation, Reservation):
             return NotPreviouslyBookedError(f'Cannot cancel the reservation: You dont have any reservation with booking id: {reservation_id}')
                
         if not force_past_slots:
@@ -230,8 +222,41 @@ class BusinessManager:
             if not valid_cancel_times:
                 return PolicyError(f'Cannot cancel the reservation: Too late to cancel. Cancelations must be requested at least {self.policy_manager.min_advance_cancelation_minutes} minutes before the start of the reservation.')
            
-       
-        slots_to_unbook = self.calendar.get_slots(start_time=booked_start_time, end_time=booked_end_time, same_segment_only=True)
+        return self._cancel_reservation(reservation)
+        
+
+    
+    def cancel_reservation_by_time(self, start_time: datetime.datetime, user: str, service_name: str=None, force_past_slots: bool=False, force_advance_cancelation: bool=False):
+        start_time = validate_time(start_time)
+        if not start_time:
+            return TypeError('start_time must be a datetime object containing date, hours and minutes of the reservation to cancel')
+        if service_name is not None and service_name not in self.policy_manager.services:
+            return PolicyError(f'Cannot cancel. Unknown service {service_name}')
+        if start_time.minute%self.policy_manager.default_slot_duration:
+            return ValueError('Invalid start time — please select a 15-minute aligned slot (e.g. 11:00, 11:15, 11:30...)')
+        
+        
+        to_warn = False
+        reservation = self.find_reservation(start_time=start_time, user=user, match_inner_time=True)
+        if not isinstance(reservation, Reservation):
+            return NotPreviouslyBookedError('You dont have any reservation at the chosen time')
+        if service_name is not None and reservation.service_name!=service_name:
+            return PolicyError('Cannot cancel a different service than the previously booked one')
+        
+        if not force_past_slots:
+            min_cancel_minutes = self.policy_manager.min_advance_cancelation_minutes * (not force_advance_cancelation)
+            valid_cancel_times, error_msg = check_cancel_reservation_constraints(reservation_start_time=reservation.start_time, min_cancel_minutes=min_cancel_minutes)
+            if not valid_cancel_times:
+                return PolicyError(f'Cannot cancel the reservation: Too late to cancel. Cancelations must be requested at least {self.policy_manager.min_advance_cancelation_minutes} minutes before the start of the reservation.')
+         
+        if reservation.start_time!=start_time:
+            warnings.warn(f'Original reservation was actually at {reservation.start_time}.')
+        
+        return self._cancel_reservation(reservation)
+        
+        
+    def _cancel_reservation(self, reservation: Reservation):
+        slots_to_unbook = self.calendar.get_slots(start_time=reservation.start_time, end_time=reservation.end_time, same_segment_only=True)
         try:
             self.calendar._lock_slots(slots_to_unbook)
             self.calendar.free_slots(slots_to_unbook)
@@ -243,61 +268,21 @@ class BusinessManager:
         finally:
             self.calendar._unlock_slots(slots_to_unbook)
 
-    
-    def cancel_reservation_by_time(self, start_time: datetime.datetime, user: str, service_name: str=None, force_past_slots: bool=False, force_advance_cancelation: bool=False):
-        if force_past_slots:
-            force_advance_cancelation=True
-        start_time = validate_time(start_time)
-        if not start_time:
-            return TypeError('start_time must be a datetime object containing date, hours and minutes of the reservation to cancel')
-        if service_name is not None and service_name not in self.policy_manager.services:
-            return PolicyError(f'Cannot cancel. Unknown service {service_name}')
-        if start_time.minute%self.policy_manager.default_slot_duration:
-            return ValueError('Invalid start time — please select a 15-minute aligned slot (e.g. 11:00, 11:15, 11:30...)')
-        
-        if not force_past_slots:
-            min_cancel_minutes = self.policy_manager.min_advance_cancelation_minutes * (not force_advance_cancelation)
-            valid_cancel_times, error_msg = check_cancel_reservation_constraints(reservation_start_time=reservation.start_time, min_cancel_minutes=min_cancel_minutes)
-            if not valid_cancel_times:
-                return PolicyError(f'Cannot cancel the reservation: Too late to cancel. Cancelations must be requested at least {self.policy_manager.min_advance_cancelation_minutes} minutes before the start of the reservation.')
-            
-        to_warn = False
-        reservation = self.reservation_manager._find_reservation_by_inner_time(start_time)
-        if reservation is None:
-            return NotPreviouslyBookedError('Cannot find a reservation at the requested time')
-        if reservation.user != user:
-            return NotPreviouslyBookedError('You dont have any reservation at the chosen time')
-        if service_name is not None and reservation.service_name!=service_name:
-            return PolicyError('Cannot cancel a different service than the previously booked one')
-        
 
-        cancel_output = self.cancel_reservation(reservation_id=reservation.reservation_id, 
-                                                user=user,
-                                                force_advance_cancelation=force_advance_cancelation, 
-                                                force_past_slots=force_past_slots)
-        if reservation.start_time!=start_time:
-            warnings.warn(f'Original reservation was at {reservation.start_time}. Canceled anyway')
-        return cancel_output
-
-
-    def update_reservation(self, user: str, old_reservation_id: str, new_start_time: datetime.datetime=None, new_service_name: str=None, new_minutes_duration: int=None, force_past_slots: bool=False, force_advance_cancelation: bool=False, force_advance_reservation=False):
-        from slots_utils import get_consecutive_slots_join
-
-        
-                
-        old_reservation = self.reservation_manager.get_reservation(old_reservation_id)
-        if old_reservation is None or old_reservation.user != user:
+    def update_reservation(self, user: str, old_reservation_id: str, new_start_time: datetime.datetime=None, new_service_name: str=None, new_minutes_duration: int=None, force_past_slots: bool=False, force_advance_cancelation: bool=False, force_advance_reservation=False):                    
+        old_reservation = self.find_reservation(reservation_id=old_reservation_id, user=user)
+        if not isinstance(old_reservation, Reservation):
             return NotPreviouslyBookedError(f'You dont have any reservation with booking id: {old_reservation_id}')
-        
-        old_user, old_service, old_start_time, old_end_time = old_reservation.user, old_reservation.service_name, old_reservation.start_time, old_reservation.end_time
-        
+                
+        if new_start_time is not None:
+            new_start_time = validate_time(new_start_time)
         validated_missing_params = self.__validate_missing_data__(old_reservation=old_reservation, start_time=new_start_time, service_name=new_service_name, minutes_duration=new_minutes_duration)
         new_start_time, new_service_name, new_minutes_duration = validated_missing_params['start_time'], validated_missing_params['service_name'], validated_missing_params['minutes_duration']
         new_end_time = new_start_time+timedelta(minutes=new_minutes_duration)
-        if old_service==new_service_name and old_start_time==new_start_time and old_end_time==new_end_time:
+        
+        if old_reservation.service_name==new_service_name and old_reservation.start_time==new_start_time and old_reservation.service_name==new_end_time:
             return ValueError('Nothing to update. The new reservation parameters are the same as the old one')
 
-        new_start_time = validate_time(new_start_time)
         if not new_start_time:
             return TypeError('new_start_time must be a datetime object containing date, hours and minutes of the reservation to cancel')
         if new_start_time.minute % self.policy_manager.default_slot_duration:
@@ -310,22 +295,55 @@ class BusinessManager:
             update_constraints_params = {'min_cancel_minutes': self.policy_manager.min_advance_cancelation_minutes * (not force_advance_cancelation),
                                          'min_reserve_minutes': self.policy_manager.min_advance_booking_minutes * (not force_advance_reservation)
                                          }
-            valid_update_times, error_msg = check_update_constraints(old_start_time=old_start_time, 
-                                                                     old_end_time=old_end_time, 
+            valid_update_times, error_msg = check_update_constraints(old_start_time=old_reservation.start_time, 
+                                                                     old_end_time=old_reservation.end_time, 
                                                                      new_start_time=new_start_time,
                                                                      new_end_time = new_end_time, 
                                                                      **update_constraints_params)
             if not valid_update_times:
                 return PolicyError(error_msg)
+               
+        new_reservation = Reservation(reservation_id=__generate_new_reservation_id__(), user=user, start_time=new_start_time, end_time=new_end_time, service_name=new_service_name)
+        return self._update_reservation(old_reservation=old_reservation, new_reservation=new_reservation)
         
-        slots_to_book = self.calendar.get_slots(start_time=new_start_time, end_time=new_end_time, same_segment_only=True)
-        slots_to_free = self.calendar.get_slots(start_time=old_start_time, end_time=old_end_time, same_segment_only=True)
-        if not slots_to_book or not slots_to_free:
-            return ClosingTimeError('Out of working hours')
+
+
+    def update_reservation_by_time(self, user: str, old_start_time: datetime.datetime, new_start_time: datetime.datetime=None, new_service_name: str=None, new_minutes_duration: int=None, force_past_slots: bool=False, force_advance_cancelation: bool=False):
+        old_start_time = validate_time(old_start_time)
+        if new_start_time is not None:
+            new_start_time = validate_time(new_start_time)
+        if old_start_time is False or new_start_time is False:
+            return  TypeError('old_start_time and new_start_time must be valid datetime objects containing date, hours and minutes')
+        
+        to_warn = False
+        old_reservation = self.find_reservation(start_time=old_start_time, user=user, match_inner_time=True)
+        if not isinstance(old_reservation, Reservation):
+            return NotPreviouslyBookedError(f'You dont have any reservation at {old_start_time}')
+        
+        if old_reservation.start_time!=old_start_time:
+            warnings.warn(f'Original reservation was actually at {old_reservation.start_time}.')
+               
+        return self.update_reservation(old_reservation_id=old_reservation.reservation_id, 
+                                                user=user,
+                                                new_service_name=new_service_name,
+                                                new_start_time=new_start_time,
+                                                new_minutes_duration=new_minutes_duration,
+                                                force_advance_cancelation=force_advance_cancelation, 
+                                                force_past_slots=force_past_slots)
+
+    
+    def _update_reservation(self, old_reservation: Reservation, new_reservation: Reservation):
+        from slots_utils import get_consecutive_slots_join
+
+        old_res_slots = self.calendar.get_slots(start_time=old_reservation.start_time, end_time=old_reservation.end_time, same_segment_only=True)
+        new_res_slots = self.calendar.get_slots(start_time=new_reservation.start_time, end_time=new_reservation.end_time, same_segment_only=True)
+
+        if not old_res_slots or not new_res_slots:
+            raise ClosingTimeError('Out of working hours')
             
-        slots_to_book, slots_to_free = get_consecutive_slots_join(slots_to_book, slots_to_free, how='diff')  ##slots_to_book and slots_to_free will be only the "exclusive" slots (i.e. not overlapping between them) to book/free
+        slots_to_book, slots_to_free = get_consecutive_slots_join(new_res_slots, old_res_slots, how='diff')  ##slots_to_book and slots_to_free will be only the "exclusive" slots (i.e. not overlapping between old_res_slots and new_res_slots)
         try:
-            """ Locking slots, updating slots status (setting previous slots as "unbooked", new slots as "booked). 
+            """ Locking slots, updating slots status (setting previous slots as "unbooked", new slots as "booked"). 
             Finally updating current mappings (removing old reservation, inserting new one).
             If anything goes wrong, return to previous status (set the old slots as booked, and keep the old reservation among reservations).
             Unlock slots.
@@ -335,55 +353,18 @@ class BusinessManager:
             self.calendar.free_slots(slots_to_free)
             self.calendar.reserve_slots(slots_to_book)
             self.reservation_manager.__remove_reservation_mapping__(old_reservation)
-            new_reservation_id = __generate_new_reservation_id__()
-            new_reservation = Reservation(reservation_id=new_reservation_id, user=user, start_time=new_start_time, end_time=new_end_time, service_name=new_service_name)
             self.reservation_manager.__insert_reservation_mapping__(new_reservation)
-            self.calendar._unlock_slots(slots_to_free)
-            self.calendar._unlock_slots(slots_to_book)
+            
             return (old_reservation, new_reservation)
         except Exception as e:
             #self.calendar.free_slots(slots_to_book)
             self.calendar.reserve_slots(slots_to_free)
             self.reservation_manager.__insert_reservation_mapping__(old_reservation)
+            
+            raise e
+        finally:
             self.calendar._unlock_slots(slots_to_free)
             self.calendar._unlock_slots(slots_to_book)
-            return e
-
-
-    def update_reservation_by_time(self, user: str, old_start_time: datetime.datetime, new_start_time: datetime.datetime=None, new_service_name: str=None, new_minutes_duration: int=None, force_past_slots: bool=False, force_advance_cancelation: bool=False):
-        old_start_time = validate_time(old_start_time)
-        if not old_start_time:
-            return  TypeError('old_start_time must be valid datetime objects containing date, hours and minutes')
-            
-        if not force_past_slots:
-            update_constraints_params = {'min_cancel_minutes': self.policy_manager.min_advance_cancelation_minutes * (not force_advance_cancelation),
-                                         'min_reserve_minutes': self.policy_manager.min_advance_booking_minutes * (not force_advance_reservation)
-                                         }
-            valid_update_times, error_msg = check_update_constraints(old_start_time=old_start_time, 
-                                                                     old_end_time=old_end_time, 
-                                                                     new_start_time=new_start_time,
-                                                                     new_end_time = new_end_time, 
-                                                                     **update_constraints_params)
-            if not valid_update_times:
-                return PolicyError(error_msg)
-        
-        to_warn = False
-        reservation = self.reservation_manager._find_reservation_by_inner_time(old_start_time)
-        if reservation is None or reservation.user != user:
-            return NotPreviouslyBookedError('You dont have any reservation at the chosen time')
-        new_start_time = validate_time(new_start_time) if new_start_time is not None else validate_time(reservation.start_time)
-        if reservation.start_time!=new_start_time:
-            warnings.warn(f'Original reservation was at {reservation.start_time}.')
-                
-        return self.update_reservation(old_reservation_id=reservation.reservation_id, 
-                                                user=user,
-                                                new_service_name=new_service_name,
-                                                new_start_time=new_start_time,
-                                                new_minutes_duration=new_minutes_duration,
-                                                force_advance_cancelation=force_advance_cancelation, 
-                                                force_past_slots=force_past_slots)
-
-    
         
         
     def is_available(self, start_time: datetime.datetime, service_name: str, minutes_duration: int = None):
@@ -425,6 +406,27 @@ class BusinessManager:
                            [str(slot.start_time) for s in list(map(lambda x: x[1], available_slots)) for slot in s]
         return (default, special)
 
+
+    def find_reservation(self, user: str, reservation_id: str=None, start_time: datetime.datetime=None,  minutes_duration: int=None, service_name: str=None, match_inner_time: bool=False):
+        if reservation_id is None and start_time is None:
+            raise ValueError(f'Must provide one among {reservation_id} and {start_time}')
+        if reservation_id is not None:
+            reservation = self.reservation_manager.get_reservation(reservation_id)
+        else:
+            reservation = self.reservation_manager._find_reservation_by_inner_time(start_time) if match_inner_time else self.reservation_manager.get_reservation_by_start_time(start_time)
+        if reservation is None:
+            return None
+        
+        validated_missing_params = self.__validate_missing_data__(old_reservation=reservation, start_time=start_time, service_name=service_name, minutes_duration=minutes_duration)
+        start_time, service_name, minutes_duration = validated_missing_params['start_time'], validated_missing_params['service_name'], validated_missing_params['minutes_duration']
+            
+        reservation_duration = minutes_between(reservation.start_time, reservation.end_time)
+        if reservation.user!=user or reservation_duration!=minutes_duration or reservation.service_name!=service_name:
+            return None
+        if start_time!=reservation.start_time:
+            warnings.warn(f'Actual start time is {reservation.start_time}')
+            start_time = reservation.start_time
+        return reservation
 
     def get_available_services(self) -> list[Service]:
         return list(self.policy_manager.services.values())
@@ -515,7 +517,7 @@ class BusinessManagerWithConfirmation(BusinessManager):
     def __init__(self, reservation_manager: ReservationManager, calendar: BusinessCalendar, policy_manager: PolicyManager, default_grid_minutes: int=15, max_confirmation_minutes: int=15):
         super().__init__(reservation_manager=reservation_manager, calendar=calendar, policy_manager=policy_manager, default_grid_minutes=default_grid_minutes)
         self.max_confirmation_minutes = max_confirmation_minutes
-        self.__updates_reservations__ = {}
+        self.__pending_updates_requests__ = {}
 
 
     
@@ -530,101 +532,58 @@ class BusinessManagerWithConfirmation(BusinessManager):
                 reservation.status = DELETED_STATUS 
             except Exception as e: ##only happens if cancel fails... should never happen
                 raise e
-        all_not_confirmed_updates = [self.reservation_manager.get_reservation(r_id) for r_id in self.__updates_reservations__ if not expired_only or datetime.datetime.now() - self.__updates_reservations__[r_id] > timedelta(minutes=self.max_confirmation_minutes)]
+        all_not_confirmed_updates = [self.reservation_manager.get_reservation(r_id) for r_id in self.__pending_updates_requests__ if not expired_only or datetime.datetime.now() - self.__pending_updates_requests__[r_id] > timedelta(minutes=self.max_confirmation_minutes)]
         for reservation in all_not_confirmed_updates:
             self.__cancel_unconfirmed_inner_update__(reservation)
         return True
             
     
-    def make_reservation(self, service_name: str, start_time: datetime.datetime, user: str, minutes_duration: int=None, force_past_slots: bool=False, force_advance_reservation: bool=False, force_default_grid: bool=True, ):
-        reservation_result = super().make_reservation(user=user, service_name=service_name, start_time=start_time, minutes_duration=minutes_duration, 
-                                        force_past_slots=force_past_slots, force_advance_reservation=force_advance_reservation,
-                                        force_default_grid=force_default_grid) 
-        if isinstance(reservation_result, Reservation):
-            reservation_result.is_confirmed = False
-            reservation_result.status = PENDING_CONFIRMATION_STATUS ##if reservation is correctly placed, it is a new reservation (i.e. no confirmation). 'pending' status by default
+    def _make_reservation(self, reservation: Reservation):
+        reservation = super()._make_reservation(reservation) 
+        if isinstance(reservation, Reservation):
+            reservation.is_confirmed = False
+            reservation.status = PENDING_CONFIRMATION_STATUS ##if reservation is correctly placed, it is a new reservation (i.e. no confirmation). 'pending' status by default
             
-        return reservation_result
-        """
-        previously_requested_reservation = self.find_reservation(user=user, start_time=start_time, minutes_duration=minutes_duration, service_name=service_name)
-        if previously_requested_reservation is not None:
-            try:
-                self.confirm_operation(reservation=previously_requested_reservation, operation='reserve', user=user)
-                return previously_requested_reservation
-            except:
-                return AlreadyBookedError('Cannot reserve at the requested time. Already booked')
-        return AlreadyBookedError('Cannot reserve at the requested time. Already booked')
-        """
-    
-    def cancel_reservation(self, reservation_id: str, user: str, force_past_slots: bool=False, force_advance_cancelation: bool=False):
-        if force_past_slots:
-            force_advance_cancelation=True
-        reservation = self.find_reservation(reservation_id=reservation_id, user=user)
-        if reservation is None:
-            return NotPreviouslyBookedError('Cannot cancel. You dont have any reservation with the specified reservation_id')
+        return reservation
         
-        if not reservation.is_confirmed: ### cancelation on a not previously confirmed reservation
-            return super().cancel_reservation(reservation_id=reservation_id, user=user, force_past_slots=force_past_slots, force_advance_cancelation=force_advance_cancelation) ###immediate cancelation - no confirmation
-        """
-        try:
-            self.confirm_operation(reservation=reservation, operation='cancel', user=user) ##checking if cancelation was already requested and it's possible to confirm...
-            return super().cancel_reservation(reservation_id=reservation_id, user=user, force_past_slots=force_past_slots, force_advance_cancelation=True) #in such case, proceed with cancelation
-        except: #otherwise, check if can be canceled, and mark reservation as pending for cancelation (i.e. waiting for further confirmation)
-        """   
-        can_cancel_result = self.can_cancel(reservation_id=reservation_id, user=user, force_advance_cancelation=force_advance_cancelation, force_past_slots=force_past_slots)
-        if not isinstance(can_cancel_result, Exception) and can_cancel_result is not False:
-            reservation.status = PENDING_CANCELATION_STATUS ##marking as "pending cancelation" till user confirms it
-            return reservation
-        return can_cancel_result
+    def confirm_reserve(self, user: str, reservation_id: str=None, start_time: datetime.datetime=None, service_name: str=None, minutes_duration: int=None):
+        start_time = validate_time(start_time)
+        reservation = self.find_reservation(user=user, reservation_id=reservation_id, start_time=start_time, 
+                                            service_name=service_name, minutes_duration=minutes_duration,  
+                                            match_inner_time=False)
+        if not isinstance(reservation, Reservation):
+            raise NotPreviouslyBookedError('Cannot confirm reservation. Cannot find a reservation with the specified details')
+        return self.__confirm_operation__(operation='reserve', reservation=reservation, user=user)
     
+        
+    def _cancel_reservation(self, reservation: Reservation):
+        if not reservation.is_confirmed:
+            return super()._cancel_reservation(reservation) ##immediate cancelation on a not previously confirmed reservation
+        reservation.status = PENDING_CANCELATION_STATUS ##marking as "pending cancelation" till user confirms it
+        return reservation
+    
+    def confirm_cancel(self,  user: str, reservation_id: str=None, start_time: datetime.datetime=None, service_name: str=None):
+        start_time = validate_time(start_time)
+        reservation = self.find_reservation(user=user, reservation_id=reservation_id, start_time=start_time, service_name=service_name, match_inner_time=True)
+        if not isinstance(reservation, Reservation):
+            raise NotPreviouslyBookedError('Cannot confirm cancelation. Cannot find a reservation with the specified details')
+        return self.__confirm_operation__(operation='cancel', reservation=reservation, user=user)
+        
             
-        
-    def update_reservation(self, user: str, old_reservation_id: str, new_start_time: datetime.datetime=None, new_service_name: str=None, new_minutes_duration: int=None, force_past_slots: bool=False, force_advance_cancelation: bool=False, force_advance_reservation=False):
+    def _update_reservation(self, old_reservation: Reservation, new_reservation: Reservation):
         from slots_utils import get_consecutive_slots_join
-        
-        old_reservation = self.find_reservation(reservation_id=old_reservation_id, user=user)
-        if old_reservation is None:
-            return NotPreviouslyBookedError('Cannot update. You dont have any reservation with the requested parameters')
-        if not old_reservation.is_confirmed: ##if updating a not-previously confirmed reservations, just moving on with normal update (no confirmation), i.e. removing old reservation and creating the new one
-            #return ConfirmationError('Cannot update a reservation that wasnt finalized')
-            update_result = super().update_reservation(user=user, old_reservation_id=old_reservation_id, new_start_time=new_start_time, new_service_name=new_service_name, new_minutes_duration=new_minutes_duration, force_past_slots=force_past_slots, force_advance_cancelation=force_advance_cancelation, force_advance_reservation=force_advance_reservation)
+
+        if not old_reservation.is_confirmed:
+            update_result = super()._update_reservation(old_reservation=old_reservation, new_reservation=new_reservation) ##immediate update on a not confirmed old_reservation
             if not isinstance(update_result, Exception):
                 old_reservation, new_reservation = update_result
                 new_reservation.is_confirmed, new_reservation.status, old_reservation.status = False, PENDING_CONFIRMATION_STATUS, DELETED_STATUS
             return update_result
-            
-            
-        validated_params = self.__validate_missing_data__(old_reservation=old_reservation, start_time=new_start_time, service_name=new_service_name, minutes_duration=new_minutes_duration)
-        validated_params['end_time'] = validated_params['start_time'] + timedelta(minutes=validated_params['minutes_duration'])
-        new_start_time, new_end_time, new_service_name, new_minutes_duration = validated_params['start_time'], validated_params['end_time'], validated_params['service_name'], validated_params.pop('minutes_duration')
-        if old_reservation.service_name==new_service_name and old_reservation.start_time==new_start_time and old_reservation.end_time==new_end_time:
-            return ValueError('Nothing to update. The new reservation parameters are the same as the old one')
-        new_res_slots = self.calendar.get_slots(start_time=new_start_time, end_time=new_end_time, same_segment_only=True)
+        
+        new_res_slots = self.calendar.get_slots(start_time=new_reservation.start_time, end_time=new_reservation.end_time, same_segment_only=True)
         old_res_slots = self.calendar.get_slots(start_time=old_reservation.start_time, end_time=old_reservation.end_time, same_segment_only=True)
         if not new_res_slots or not old_res_slots:
             return ClosingTimeError('Cannot update. Out of working hours')
-
-        """
-        slots_to_book, slots_to_free = get_consecutive_slots_join(slots_to_book, slots_to_free, how='diff')  ##slots_to_book and slots_to_free will be only the "exclusive" slots (i.e. not overlapping between them) to book/free
-
-        previously_requested_reservation = getattr(old_reservation, 'update_reservation') ##previously requested update , if any
-        if isinstance(previously_requested_reservation, Reservation) and previously_requested_reservation.start_time==new_start_time and previously_requested_reservation.service_name==new_service_name and previously_requested_reservation.minutes_duration==new_minutes_duration:
-            try:
-                self.confirm_operation(reservation=old_reservation, operation='update', user=user) ##confirming if update request was the same as the current one... only confirming if status was 'pending update'
-                #raise NotImplementedError('free_slots(previously_requested_reservation.slots) ###TODO ...')
-                self.calendar._lock_slots(slots_to_free)
-                self.calendar.free_slots(slots_to_free) 
-                self.reservation_manager.__insert_reservation_mapping__(previously_requested_reservation) ###proceding with update as normal update
-                self.reservation_manager.__remove_reservation_mapping__(old_reservation)
-
-                return super().update_reservation(user=user, old_reservation_id=old_reservation_id, new_start_time=new_start_time, new_service_name=new_service_name, new_minutes_duration=new_minutes_duration)
-            except:
-                pass
-        
-        """
-            
-                    
-        ##creating a new update (will need further confirmation)
         try:
             prev_update_res_slots = self.calendar.get_slots(start_time=old_reservation.update_reservation.start_time, end_time=old_reservation.update_reservation.end_time, same_segment_only=True)
         except:
@@ -640,13 +599,12 @@ class BusinessManagerWithConfirmation(BusinessManager):
             self.calendar._lock_slots(slots_to_book)
             self.calendar._lock_slots(slots_to_free)
             self.calendar.reserve_slots(slots_to_book) ### reserving the new slots. Only works if update is doable (i.e. slots are all free)
-
             self.calendar.free_slots(slots_to_free)
-
-            new_reservation = Reservation(reservation_id=__generate_new_reservation_id__(), user=user, start_time=new_start_time, end_time=new_end_time, service_name=new_service_name, status=PENDING_CONFIRMATION_STATUS, is_confirmed=False)
             old_reservation.status = PENDING_UPDATE_STATUS
+            new_reservation.status, new_reservation.is_confirmed = PENDING_CONFIRMATION_STATUS, False
+            
             old_reservation.update_reservation = new_reservation ###setting the new reservation as a parameter within the old one. This way the system will create it 
-            self.__updates_reservations__[old_reservation.reservation_id] = new_reservation.timestamp
+            self.__pending_updates_requests__[old_reservation.reservation_id] = new_reservation.timestamp
             return (old_reservation, new_reservation)
         except:
             return AlreadyBookedError('Cannot update. The requested time is not available for booking')
@@ -654,31 +612,29 @@ class BusinessManagerWithConfirmation(BusinessManager):
             self.calendar._unlock_slots(slots_to_book)
             self.calendar._unlock_slots(slots_to_free)
 
-        
-                    
     
-    
-    def confirm_operation_by_details(self, operation: str, user: str, old_reservation_id: str=None, old_start_time: datetime.datetime=None, old_service_name: str=None, old_minutes_duration: int=None, new_start_time: datetime.datetime=None, new_service_name: str=None, new_minutes_duration: int=None):
+    def confirm_update(self, user: str, old_reservation_id: str=None, old_start_time: datetime.datetime=None, new_start_time: datetime.datetime=None, 
+                       new_service_name: str=None, new_minutes_duration: int=None):
         old_start_time, new_start_time = validate_time(old_start_time) or None, validate_time(new_start_time) or None
-        old_reservation = self.find_reservation(match_notexact_time=False if operation=='reserve' else True,
-                                                    user=user, 
-                                                    start_time=old_start_time, 
-                                                    reservation_id=old_reservation_id,
-                                                    minutes_duration=old_minutes_duration,
-                                                    service_name=old_service_name)
-        if old_reservation is None:
-            raise NotPreviouslyBookedError('Cannot confirm. Cannot find a reservation with the specified parameters')
-        if operation=='update':
-            new_res_details = self.__validate_missing_data__(start_time=new_start_time, service_name=new_service_name, minutes_duration=new_minutes_duration, old_reservation=old_reservation)
-            new_res_details['end_time'] = new_res_details['start_time'] + timedelta(minutes=new_res_details.pop('minutes_duration'))
-            if not isinstance(getattr(old_reservation, 'update_reservation', None), Reservation):
-                raise ConfirmationError('Cannot update. You should call update_reservation with the chosen parameters to make a new update_request before confirming')
-            if any(getattr(old_reservation.update_reservation, attr, -1)!=new_res_details[attr] for attr in new_res_details):
-                raise ConfirmationError('Cannot update. The new update reservation parameters are different than the previously requested one. You should probably call update_reservation with such parameters')
-        return self.confirm_operation(operation=operation, user=user, reservation=old_reservation)
+        old_reservation = self.find_reservation(user=user, reservation_id=old_reservation_id, 
+                                                start_time=old_start_time, match_inner_time=True)
+        if not isinstance(old_reservation, Reservation):
+            raise NotPreviouslyBookedError('Cannot confirm the update. Cannot find a reservation with the specified parameters')
+        
+        new_res_details = self.__validate_missing_data__(start_time=new_start_time, service_name=new_service_name, minutes_duration=new_minutes_duration, old_reservation=old_reservation)
+        new_res_details['end_time'] = new_res_details['start_time'] + timedelta(minutes=new_res_details.pop('minutes_duration'))
+        if not isinstance(getattr(old_reservation, 'update_reservation', None), Reservation):
+            raise ConfirmationError('Cannot confirm update. No previously requested update to confirm.')
+        if any(getattr(old_reservation.update_reservation, attr, -1)!=new_res_details[attr] for attr in new_res_details):
+            raise ConfirmationError('Cannot update. The new update reservation parameters are different than the previously required ones.\
+                                    You should probably call update_reservation with such parameters')
+        return self.__confirm_operation__(operation='update', user=user, reservation=old_reservation)
     
     
-    def confirm_operation(self, user: str, reservation: Reservation, operation: str, **kwargs):
+    
+    
+    
+    def __confirm_operation__(self, user: str, reservation: Reservation, operation: str, **kwargs):
         """
         Changes reservation status, if it respects confirmation status flow: 
         i.e. if its current status is waiting for confirmation, and confirmation was requested no more than max_confirmation_minutes ago. 
@@ -706,9 +662,6 @@ class BusinessManagerWithConfirmation(BusinessManager):
             raise ValueError(f'Wrong confirm operation {operation}. Must be one of {feasible_current_statuses.keys()}')
         if user!=reservation.user:
             raise NotPreviouslyBookedError('You dont have any reservation with the specified details')
-        
-        
-   
    
         if operation == 'update':
             if not isinstance(getattr(reservation, 'update_reservation', None), Reservation):
@@ -722,49 +675,27 @@ class BusinessManagerWithConfirmation(BusinessManager):
                 reservation.is_confirmed = True
                 return reservation
             if operation == 'cancel':
-                return super().cancel_reservation(reservation_id=reservation.reservation_id, user=user, force_advance_cancelation=True, force_past_slots=True)
+                return super()._cancel_reservation(reservation=reservation)
             if operation=='update':
+                ##cannot call super()._update_reservation because the new reservation slots have already been reserved at the request time!
                 new_start_time, new_service_name, new_end_time = reservation.update_reservation.start_time, reservation.update_reservation.service_name, reservation.update_reservation.end_time
-                slots_to_book = self.calendar.get_slots(start_time=new_start_time, end_time=new_end_time, same_segment_only=True)
-                slots_to_free = self.calendar.get_slots(start_time=reservation.start_time, end_time=reservation.end_time, same_segment_only=True)
-                if not slots_to_book or not slots_to_free:
+                new_res_slots = self.calendar.get_slots(start_time=new_start_time, end_time=new_end_time, same_segment_only=True)
+                old_res_slots = self.calendar.get_slots(start_time=reservation.start_time, end_time=reservation.end_time, same_segment_only=True)
+                if not new_res_slots or not old_res_slots:
                     return ClosingTimeError('Out of working hours')
-                slots_to_book, slots_to_free = get_consecutive_slots_join(slots_to_book, slots_to_free, how='diff')  ##slots_to_book and slots_to_free will be only the "exclusive" slots (i.e. not overlapping between them) to book/free
+                slots_to_free = get_consecutive_slots_join(new_res_slots, old_res_slots, how='diff')[1]  #slots_to_free will be only the "exclusive" old slots (i.e. old slots - new slots) to free
                 try:
                     self.calendar._lock_slots(slots_to_free)
                     self.calendar.free_slots(slots_to_free) ##releasing old reservation slots -- NO NEED TO BOOK NEW SLOTS. IT WAS ALREADY DONE AT THE PREVIOUS REQUEST
-                    self.confirm_operation(user=user, reservation=reservation.update_reservation, operation='reserve') ##setting the status as 'confirmed' to the new reservation
+                    self.__confirm_operation__(user=user, reservation=reservation.update_reservation, operation='reserve') ##setting the status as 'confirmed' to the new reservation
+                    self.reservation_manager.__remove_reservation_mapping__(reservation) ##removing old reservation from "db"
                     self.reservation_manager.__insert_reservation_mapping__(reservation.update_reservation) ###inserting the new update reservation among reservations
-                    self.reservation_manager.__remove_reservation_mapping__(reservation) ##removing old ones
-                    self.__updates_reservations__.pop(old_reservation.reservation_id)
+                    self.__pending_updates_requests__.pop(reservation.reservation_id)
                 finally:
                     self.calendar._unlock_slots(slots_to_free)
-                
             
         except Exception as e:
             raise e
-        
-    
-    def find_reservation(self, user: str, reservation_id: str=None, start_time: datetime.datetime=None,  minutes_duration: int=None, service_name: str=None, match_notexact_time: bool=False):
-        if reservation_id is None and start_time is None:
-            raise ValueError(f'Must provide one among {reservation_id} and {start_time}')
-        if reservation_id is not None:
-            reservation = self.reservation_manager.get_reservation(reservation_id)
-        else:
-            reservation = self.reservation_manager._find_reservation_by_inner_time(start_time) if match_notexact_time else self.reservation_manager.get_reservation_by_start_time(start_time)
-        if reservation is None:
-            return None
-        
-        validated_missing_params = self.__validate_missing_data__(old_reservation=reservation, start_time=start_time, service_name=service_name, minutes_duration=minutes_duration)
-        start_time, service_name, minutes_duration = validated_missing_params['start_time'], validated_missing_params['service_name'], validated_missing_params['minutes_duration']
-            
-        reservation_duration = minutes_between(reservation.start_time, reservation.end_time)
-        if reservation.user!=user or reservation_duration!=minutes_duration or reservation.service_name!=service_name:
-            return None
-        if start_time!=reservation.start_time:
-            warnings.warn(f'Actual start time is {reservation.start_time}')
-            start_time = reservation.start_time
-        return reservation
         
             
     def __cancel_unconfirmed_inner_update__(self, reservation: Reservation):
@@ -783,7 +714,7 @@ class BusinessManagerWithConfirmation(BusinessManager):
             reservation.update_reservation = None
             if reservation.status == PENDING_UPDATE_STATUS:
                 reservation.status = CONFIRMED_STATUS
-            self.__updates_reservations__.pop(reservation.reservation_id)
+            self.__pending_updates_requests__.pop(reservation.reservation_id)
         except Exception as e:
             raise e
         finally:
