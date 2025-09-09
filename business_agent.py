@@ -99,18 +99,18 @@ def method_dict_to_str(method_dict: dict[str, dict[str, Any]]) -> str:
 import datetime
 from datetimes_utils import map_datetime_to_next_slot_datetime
 from globals_shared import *
-from business_manager import BusinessManager
+from business_manager import BusinessManager, BusinessManagerWithConfirmation
 from booking_errors import *
 from collections import defaultdict
 
-final_operations_mapping = {'make_reservation':'can_reserve', 
-                            'update_reservation': 'can_update',
-                            'update_reservation_by_time': 'can_update',
-                            'cancel_reservation': 'can_cancel', 
-                            'cancel_reservation_by_time': 'can_cancel',
-                           'add_service': 'can_make_service_change',
-                           'update_service': 'can_make_service_change',
-                           'remove_service': 'can_make_service_change'}
+final_operations_mapping = {'make_reservation':'confirm_reserve', 
+                            'update_reservation': 'confirm_update',
+                            'update_reservation_by_time': 'confirm_update',
+                            'cancel_reservation': 'confirm_cancel', 
+                            'cancel_reservation_by_time': 'confirm_cancel',
+                           'add_service': 'confirm_add_service',
+                           'update_service': 'confirm_update_service',
+                           'remove_service': 'confirm_remove_service'}
 PENDING = 'W'
 SUCCESS = 'S'
 FAILED_CONFLICT = 'F_C'
@@ -118,10 +118,7 @@ FAILED_INVALID = 'F_I'
 FAILED_POLICY = 'F_P'
 ERROR = 'E'
 
-def _map_user_to_role(user):
-    if user in ['admin', 'system']:
-        return user
-    return 'user'
+
     
     
 class BusinessAgent:
@@ -158,38 +155,29 @@ class BusinessAgent:
             response = PermissionError('')
             self.__update_status__(response)
             return (False, response, PermissionError('Operation not allowed'), '')
-        user_role = _map_user_to_role(request.get(USER_ATTRIBUTE, ''))
-        if 'user' in self.__exposed_methods_params__[user_role][request[METHOD_ATTRIBUTE]] and 'user' not in request.get(PARAMS_ATTRIBUTE, []): ##adding user if needed as param since it was "hidden" in methods shown to llm
+        user_role = self._map_user_to_role(request.get(USER_ATTRIBUTE, ''))
+        user_param_needed = 'user' in self.__exposed_methods_params__[user_role][request[METHOD_ATTRIBUTE]]
+        if user_param_needed and 'user' not in request.get(PARAMS_ATTRIBUTE, []): ##adding user if needed as param since it was "hidden" in methods shown to llm
             request[PARAMS_ATTRIBUTE]['user'] = request.get(USER_ATTRIBUTE, '')
-
+        print(request)
         output_extra_msg = ''
         if (user_method_request:=request[METHOD_ATTRIBUTE]) in final_operations_mapping:
             corresponding_confirmation_method = final_operations_mapping[user_method_request]
-            last_user_request = self.request.get(request.get(USER_ATTRIBUTE), [])[-1:]
-
-            corresponding_confirmation_method_params, needed_params = {}, self.get_exposed_methods_params(user='system')[corresponding_confirmation_method] 
-            print('Needed params:', needed_params)
-            for p in needed_params:
-                if p in request[PARAMS_ATTRIBUTE]:
-                    corresponding_confirmation_method_params[p]=request[PARAMS_ATTRIBUTE][p]
-                elif p=='operation' and '_service' in corresponding_confirmation_method:
-                    corresponding_confirmation_method_params['operation'] = request.get(METHOD_ATTRIBUTE).split('_service')[0]
-            if \
-            not len(last_user_request) or last_user_request[0].get(METHOD_ATTRIBUTE)!=corresponding_confirmation_method \
-            or \
-            any([corresponding_confirmation_method_params[p]!=last_user_request[0][PARAMS_ATTRIBUTE].get(p) for p in corresponding_confirmation_method_params]):
-                ##if the final operation is not the same as the last request from user (i.e. checked with the exact same params), move to safe non-final operation. 
-                output_extra_msg = f"The operation was changed from {user_method_request} to {corresponding_confirmation_method} \
-                for consistency reason. I have only checked whether {corresponding_confirmation_method} can be performed. \
-                Explain it to the user in a very human friendly way." ##tell the user about this change and ask if he really wants to proceed.
-                user_params_request = request.get(PARAMS_ATTRIBUTE, {})
-                request[METHOD_ATTRIBUTE] = corresponding_confirmation_method ##changing from final operation to confirmation operation
-                request[PARAMS_ATTRIBUTE] = corresponding_confirmation_method_params
+            confirmation_request = request.copy()
+            confirmation_request[METHOD_ATTRIBUTE] = corresponding_confirmation_method
+            confirmation_request[USER_ATTRIBUTE] = 'system'
+            """
+            if user_method_request.endswith('_service'):
+                confirmation_request[PARAMS_ATTRIBUTE]['operation']=user_method_request.split('_service')[0]
+            """
+            confirmation_action_response = self.make_action(request=confirmation_request, force_role=True)
+            if confirmation_action_response[1]:
+                return confirmation_action_response
                 
-
+        """
         if request.get(USER_ATTRIBUTE):
             self.request[request[USER_ATTRIBUTE]].append({k:request.get(k) for k in [METHOD_ATTRIBUTE, PARAMS_ATTRIBUTE]})
-
+        """
         try:
             request_str = self.__build_method_request__(request)
             response = eval(request_str)
@@ -279,9 +267,12 @@ class BusinessAgent:
         """
 
         if user=='system':
-            exposed_methods = ['get_default_opening_hours', 'get_user_reservations', 'get_available_services', 
-                               'can_cancel', 'can_update', 'can_reserve', 'can_make_service_change']
-            return exposed_methods
+            system_exposed_methods = ['get_default_opening_hours', 'get_user_reservations', 'get_available_services', 
+                               'can_cancel', 'can_update', 'can_reserve', 
+                               'can_add_service', 'can_update_service', 'can_remove_service']
+            if isinstance(self.business_manager, BusinessManagerWithConfirmation):
+                system_exposed_methods += ['confirm_reserve', 'confirm_cancel', 'confirm_update', 'confirm_add_service', 'confirm_remove_service', 'confirm_update_service']
+            return system_exposed_methods
             
         
         exposed_methods = ['make_reservation', 'cancel_reservation', 'cancel_reservation_by_time',
@@ -305,7 +296,7 @@ class BusinessAgent:
         If as_string, returns the output as list [method_name (param_name: param_type = default_value)] (i.e. same as method definition in python)
         """
         exposed_methods = self.get_exposed_methods(user)
-        user_role = _map_user_to_role(user)
+        user_role = self._map_user_to_role(user)
         if user_role=='user':
             exclude=lambda x: 'force' in x or 'user' in x or x=='minutes_duration'
         else:
@@ -326,4 +317,11 @@ class BusinessAgent:
         if attr in ['business_manager', '__exposed_methods_params__']:
             raise ValueError(f"Cannot update the attribute {attr}")
         return super.__setattr__(self, attr, value)
+        
+        
+    @staticmethod
+    def _map_user_to_role(user):
+        if user in ['admin', 'system']:
+            return user
+        return 'user'
     

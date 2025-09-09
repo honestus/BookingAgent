@@ -1,10 +1,10 @@
 import datetime
 class Service():
-    def __init__(self, name, price, minutes_duration, description=''):
+    def __init__(self, service_name, price, minutes_duration, description=''):
         self.price = price
         self.minutes_duration = self.__validate_duration__(minutes_duration)
         self.description = description
-        object.__setattr__(self, 'name', name)
+        object.__setattr__(self, 'service_name', service_name)
 
 
     def set_price(self,price):
@@ -26,19 +26,22 @@ class Service():
         
     
     def __setattr__(self, attribute, value):
-        if attribute=='name':
-            raise TypeError('Cannot update service name. It is uneditable!')
+        if attribute=='service_name':
+            raise TypeError('Cannot update service_name. It is final!')
         elif attribute=='minutes_duration':
             value = self.__validate_duration__(value)
         super().__setattr__(attribute, value)
 
     def __repr__(self):
-        return f"Service: {self.name}. Price: {self.price}. Duration: {self.minutes_duration} mins." + (f"\n{self.description}" if self.description else '')
+        return f"Service: {self.service_name}. Price: {self.price}. Duration: {self.minutes_duration} mins." + (f"\n{self.description}" if self.description else '')
+        
+    def __eq__(self, other):
+        return all(getattr(self, attribute)==getattr(other, attribute) for attribute in ['service_name', 'price', 'minutes_duration'])
 
 
 class PolicyManager():
     def __init__(self, services, min_advance_booking_minutes=30, min_advance_cancelation_minutes=120, opening_hours = [('09:00', '13:00'), ('15:00','21:00')]):
-        self.services = {service.name:service for service in services}
+        self.services = {service.service_name:service for service in services}
         self.min_advance_booking_minutes = min_advance_booking_minutes
         self.min_advance_cancelation_minutes = min_advance_cancelation_minutes
         self.opening_hours = [(datetime.datetime.strptime(h[0], "%H:%M").time(),  datetime.datetime.strptime(h[1], "%H:%M").time()) for h in opening_hours]
@@ -51,22 +54,22 @@ class PolicyManager():
         return
         
     def add_service(self, service: Service):
-        if service.name in self.services:
-            raise ValueError('Cannot add a service that already exists')
-        self.services[service.name]=service
+        if service.service_name in self.services:
+            return False
+        self.services[service.service_name]=service
         self.__set_default_slot_duration__()
+        return service
 
-    def remove_service(self,service_name: str):
+    def remove_service(self, service_name: str):
         if service_name not in self.services:
             return False
-        self.services = {s:self.services[s] for s in self.services if s!=service_name}
+        old_service = self.services.pop(service_name)
         self.__set_default_slot_duration__()
+        return old_service
 
     def update_service(self, service_name: str, price: float = None, minutes_duration: int = None, description: str = None):
         if service_name not in self.services:
-            raise ValueError('Service not in current services')
-        if all(el is None for el in [price, minutes_duration, description]):
-            return #raise ValueError('Nothing to update.')
+            return False
         curr_service = self.services[service_name]
         if price is not None:
             curr_service.set_price(price)
@@ -75,4 +78,5 @@ class PolicyManager():
             self.__set_default_slot_duration__()
         if description is not None:
             curr_service.set_description(description)
+        return curr_service
         

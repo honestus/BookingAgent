@@ -114,7 +114,7 @@ class BusinessManager:
         if all([p is None for p in [new_start_time, new_service_name, new_minutes_duration]]):
             return ValueError('Nothing to update. The reservation is exactly the same as the old one')
         
-        validated_params = self.__validate_missing_data__(old_reservation=reservation, start_time=new_start_time, service_name=new_service_name, minutes_duration=new_minutes_duration)
+        validated_params = self.__validate_missing_reservation_params__(old_reservation=reservation, start_time=new_start_time, service_name=new_service_name, minutes_duration=new_minutes_duration)
         new_start_tim, new_service_name, new_minutes_duration = validated_params['start_time'], validated_params['service_name'], validated_params.pop('minutes_duration')
         new_end_time = new_start_time+timedelta(minutes=new_minutes_duration)
         if not force_past_slots:    
@@ -276,7 +276,7 @@ class BusinessManager:
                 
         if new_start_time is not None:
             new_start_time = validate_time(new_start_time)
-        validated_missing_params = self.__validate_missing_data__(old_reservation=old_reservation, start_time=new_start_time, service_name=new_service_name, minutes_duration=new_minutes_duration)
+        validated_missing_params = self.__validate_missing_reservation_params__(old_reservation=old_reservation, start_time=new_start_time, service_name=new_service_name, minutes_duration=new_minutes_duration)
         new_start_time, new_service_name, new_minutes_duration = validated_missing_params['start_time'], validated_missing_params['service_name'], validated_missing_params['minutes_duration']
         new_end_time = new_start_time+timedelta(minutes=new_minutes_duration)
         
@@ -417,7 +417,7 @@ class BusinessManager:
         if reservation is None:
             return None
         
-        validated_missing_params = self.__validate_missing_data__(old_reservation=reservation, start_time=start_time, service_name=service_name, minutes_duration=minutes_duration)
+        validated_missing_params = self.__validate_missing_reservation_params__(old_reservation=reservation, start_time=start_time, service_name=service_name, minutes_duration=minutes_duration)
         start_time, service_name, minutes_duration = validated_missing_params['start_time'], validated_missing_params['service_name'], validated_missing_params['minutes_duration']
             
         reservation_duration = minutes_between(reservation.start_time, reservation.end_time)
@@ -432,31 +432,42 @@ class BusinessManager:
         return list(self.policy_manager.services.values())
         
     def add_service(self, service_name: str, price: int|float, minutes_duration: int, description: str = ''):
-        if not validate_service_inputs(service_name = service_name, service_price = price, service_minutes_duration = minutes_duration, service_description = description):
-            return ValueError('Wrong input to create the new Service')
-            
-        service = Service(name=service_name, price=price, minutes_duration=minutes_duration, description=description)
-        self.policy_manager.add_service(service=service)
-        
+        add_doable, error_msg = self.can_add_service(service_name=service_name, price=price, minutes_duration=minutes_duration, description=description)
+        if not add_doable:
+            return ValueError(error_msg)
+        service = Service(service_name=service_name, price=price, minutes_duration=minutes_duration, description=description)
+        return self.policy_manager.add_service(service=service)
+         
+         
     def update_service(self, service_name: str, price: int|float = None, minutes_duration: int = None, description: str = None):
-        if not validate_service_inputs(service_name = service_name, service_price = price, service_minutes_duration = minutes_duration, service_description = description):
-            return ValueError('Wrong input to create the new Service')
+        update_doable, error_msg = self.can_update_service(service_name = service_name, price = price, minutes_duration = minutes_duration, description = description)
+        if not update_doable:
+            return ValueError(error_msg)
         return self.policy_manager.update_service(service_name=service_name, price=price, minutes_duration=minutes_duration, description=description)
         
-    def remove_service(self, service_name):
+    def remove_service(self, service_name: str):
+        remove_doable, error_msg = self.can_remove_service(service_name)
+        if not remove_doable:
+            return ValueError(error_msg)
         return self.policy_manager.remove_service(service_name=service_name)
         
-    def can_make_service_change(self, operation: str, service_name: str, price: int|float = None, minutes_duration: int = None, description: str = None):
-        allowed_operations = ['add', 'update', 'remove']
-        if operation not in allowed_operations:
-            return ValueError(f'Wrong operation. It must be one of: {allowed_operations}')
-        if not validate_service_inputs(service_name = service_name, service_price = price, service_minutes_duration = minutes_duration, service_description = description):
-            return ValueError(f'Wrong input parameters to {operation} the new Service')
-        if minutes_duration%self.policy_manager.default_slot_duration:
-            return ValueError(f'Minutes duration must be a multiple of {self.policy_manager.default_slot_duration}')
-        if operation=='add':
-            return service_name not in self.policy_manager.services
-        return service_name in self.policy_manager.services
+    def can_add_service(self, service_name: str, price: int|float, minutes_duration: int, description: str = None):
+        if not validate_service_inputs(service_name = service_name, service_price = price, service_minutes_duration = minutes_duration, service_description = description, allow_None=False):
+            return (False, 'Wrong service parameters')#ValueError(f'Wrong input service parameters. Cannot add the new service')
+        not_already_there = service_name not in self.policy_manager.services
+        return (not_already_there, ''  if not_already_there else f'Cannot add. {service_name} Already present')
+            
+
+    def can_remove_service(self, service_name: str):
+        already_there = service_name in self.policy_manager.services
+        return (already_there, ''  if already_there else f'Cannot remove. Service {service_name} not present')
+        
+    def can_update_service(self, service_name: str, price: int|float = None, minutes_duration: int = None, description: str = None):
+        if not validate_service_inputs(service_name = service_name, service_price = price, service_minutes_duration = minutes_duration, service_description = description, allow_None=True):
+            return (False, 'Wrong service parameters')#ValueError(f'Wrong input service parameters. Cannot update the service')
+        already_there = service_name in self.policy_manager.services
+        return (already_there, ''  if already_there else f'Cannot update. Service {service_name} not present')
+
         
     def add_new_calendar(self, calendar: BusinessCalendar):
         self.calendar = self.calendar.join(calendar)
@@ -496,7 +507,7 @@ class BusinessManager:
         except:
             return ValueError(f'Unknown service {service_name}')
         
-    def __validate_missing_data__(self, start_time: datetime.datetime=None, service_name: str=None, minutes_duration: int=None, old_reservation: Reservation=None):
+    def __validate_missing_reservation_params__(self, start_time: datetime.datetime=None, service_name: str=None, minutes_duration: int=None, old_reservation: Reservation=None):
         final_dct = {'start_time':start_time, 'service_name':service_name, 'minutes_duration':minutes_duration}
         if old_reservation is None:
             if service_name is None:
@@ -507,6 +518,17 @@ class BusinessManager:
             final_dct['minutes_duration']=minutes_duration or (self._get_duration_from_service_name(service_name) if service_name is not None else minutes_between(old_reservation.start_time, old_reservation.end_time) )
             final_dct['service_name']=service_name or old_reservation.service_name
         return final_dct
+        
+    def __validate_missing_service_params__(self, service_name: str, price: int|float = None, minutes_duration: int = None, description: str = None):
+        if service_name not in self.policy_manager.services:
+            raise ValueError(f'Unknown service {service_name}')
+        service = self.policy_manager.services[service_name]
+        params = {'service_name':service_name,
+                  'price': price or service.price,
+                  'minutes_duration': minutes_duration or service.minutes_duration,
+                  'description': description or service.description
+                  }
+        return params
     
        
 
@@ -518,21 +540,31 @@ class BusinessManagerWithConfirmation(BusinessManager):
         super().__init__(reservation_manager=reservation_manager, calendar=calendar, policy_manager=policy_manager, default_grid_minutes=default_grid_minutes)
         self.max_confirmation_minutes = max_confirmation_minutes
         self.__pending_updates_requests__ = {}
+        self.__pending_services_requests__ = {}
 
 
+    def cancel_all_not_confirmed_services(self, expired_only: bool=False):
+        not_confirmed_services = {serv_name: (req_time:=v[2]) for serv_name, v in self.__pending_services_requests__.items()}
+        if expired_only:
+            not_confirmed_services = [s for s, req_time in not_confirmed_services.items() if not self.is_within_allowed_confirmation_time(req_time)]
+        for s in not_confirmed_services:
+            self.__pending_services_requests__.pop(s)
+        return True
     
     def cancel_all_not_confirmed_reservations(self, user: str=None, expired_only: bool=False):
         all_reservations = self.get_all_reservations() if user is None else self.get_user_reservations(user)
         all_not_confirmed_reservations = [r for r in all_reservations if not r.is_confirmed]
         if expired_only:
-            all_not_confirmed_reservations = [r for r in all_not_confirmed_reservations if datetime.datetime.now() - r.status_change_timestamp > timedelta(minutes=self.max_confirmation_minutes)]
+            all_not_confirmed_reservations = [r for r in all_not_confirmed_reservations if not self.is_within_allowed_confirmation_time(request_time=r.status_change_timestamp)]
         for reservation in all_not_confirmed_reservations:
             reservation = super().cancel_reservation(reservation_id=reservation.reservation_id, user=reservation.user, force_advance_cancelation=True, force_past_slots=True) ##forcing cancelation of past reservations too
-            try:
-                reservation.status = DELETED_STATUS 
-            except Exception as e: ##only happens if cancel fails... should never happen
-                raise e
-        all_not_confirmed_updates = [self.reservation_manager.get_reservation(r_id) for r_id in self.__pending_updates_requests__ if not expired_only or datetime.datetime.now() - self.__pending_updates_requests__[r_id] > timedelta(minutes=self.max_confirmation_minutes)]
+            if not isinstance(reservation, Reservation):
+                raise reservation ##only happens if cancel fails... should never happen
+            return reservation
+        
+        all_not_confirmed_updates = self.__pending_updates_requests__.copy()
+        if expired_only:
+            all_not_confirmed_updates = [res_id for res_id, req_time in all_not_confirmed_updates.items() if not self.is_within_allowed_confirmation_time(request_time=req_time)]
         for reservation in all_not_confirmed_updates:
             self.__cancel_unconfirmed_inner_update__(reservation)
         return True
@@ -621,7 +653,7 @@ class BusinessManagerWithConfirmation(BusinessManager):
         if not isinstance(old_reservation, Reservation):
             raise NotPreviouslyBookedError('Cannot confirm the update. Cannot find a reservation with the specified parameters')
         
-        new_res_details = self.__validate_missing_data__(start_time=new_start_time, service_name=new_service_name, minutes_duration=new_minutes_duration, old_reservation=old_reservation)
+        new_res_details = self.__validate_missing_reservation_params__(start_time=new_start_time, service_name=new_service_name, minutes_duration=new_minutes_duration, old_reservation=old_reservation)
         new_res_details['end_time'] = new_res_details['start_time'] + timedelta(minutes=new_res_details.pop('minutes_duration'))
         if not isinstance(getattr(old_reservation, 'update_reservation', None), Reservation):
             raise ConfirmationError('Cannot confirm update. No previously requested update to confirm.')
@@ -631,6 +663,8 @@ class BusinessManagerWithConfirmation(BusinessManager):
         return self.__confirm_operation__(operation='update', user=user, reservation=old_reservation)
     
     
+    def is_within_allowed_confirmation_time(self, request_time):
+        return datetime.datetime.now() - request_time <= timedelta(minutes=self.max_confirmation_minutes)
     
     
     
@@ -649,7 +683,7 @@ class BusinessManagerWithConfirmation(BusinessManager):
             """
             if reservation.status not in feasible_current_statuses:
                 raise ConfirmationError('Cannot confirm -- wrong status')
-            if datetime.datetime.now() - reservation.status_change_timestamp > timedelta(minutes=self.max_confirmation_minutes):
+            if not self.is_within_allowed_confirmation_time(request_time=reservation.status_change_timestamp):
                 raise ConfirmationError(f'Cannot {operation}. Too much time after {operation} request')
             reservation.status = final_status
             return reservation
@@ -720,3 +754,77 @@ class BusinessManagerWithConfirmation(BusinessManager):
         finally:
             self.calendar._unlock_slots(slots_to_free)
         return True
+        
+        
+    def add_service(self, service_name: str, price: int|float, minutes_duration: int, description: str = ''):
+        add_doable, error_msg = self.can_add_service(service_name=service_name, price=price, minutes_duration=minutes_duration, description=description)
+        if not add_doable:
+            return ValueError(error_msg)
+        service = Service(service_name=service_name, price=price, minutes_duration=minutes_duration, description=description)
+        self.__pending_services_requests__[service_name] = ('add', service, datetime.datetime.now())
+        
+    def update_service(self, service_name: str, price: int|float = None, minutes_duration: int = None, description: str = None):
+        update_doable, error_msg = self.can_update_service(service_name = service_name, price = price, minutes_duration = minutes_duration, description = description)
+        if not update_doable:
+            return ValueError(error_msg)
+        updated_service = Service(**self.__validate_missing_service_params__(service_name=service_name, price=price, minutes_duration=minutes_duration, description=description))
+        self.__pending_services_requests__[service_name] = ('update', updated_service, datetime.datetime.now())
+        return updated_service
+                
+    def remove_service(self, service_name: str):
+        remove_doable, error_msg = self.can_remove_service(service_name)
+        if not remove_doable:
+            return ValueError(error_msg)
+        service_to_remove = Service(**self.__validate_missing_service_params__(service_name=service_name, price=price, minutes_duration=minutes_duration, description=description))
+        self.__pending_services_requests__[service_name] = ('remove', service_to_remove, datetime.datetime.now())
+
+    def confirm_add_service(self, service_name: str, price: int|float, minutes_duration: int, description: str = ''):
+        pending_service_req = self.__pending_services_requests__.get(service_name, None)
+        if not pending_service_req or pending_service_req[0]!='add':
+            return ValueError('Cannot confirm add. No previous add request')
+            
+        service = Service(service_name=service_name, price=price, minutes_duration=minutes_duration, description=description)
+        if service!=pending_service_req[1]:
+            return ValueError(f'Cannot confirm adding {service_name}. Previous requested service parameters were different than current ones')
+
+        if not self.is_within_allowed_confirmation_time(request_time=pending_service_req[2]):
+            return ConfirmationError(f'Too late to confirm. Confirmation must be done within {self.max_confirmation_minutes} minutes after the original request')
+        
+        is_added = self.policy_manager.add_service(service=service)
+        if is_added is not False:
+            self.__pending_services_requests__.pop(service_name)
+        return is_added
+        
+    def confirm_update_service(self, service_name: str, price: int|float, minutes_duration: int, description: str = ''):
+        pending_service_req = self.__pending_services_requests__.get(service_name, None)
+        if not pending_service_req or pending_service_req[0]!='update':
+            return ValueError('Cannot confirm update. No previous update request')
+            
+        updated_service = Service(**self.__validate_missing_service_params__(service_name=service_name, price=price, minutes_duration=minutes_duration, description=description))
+        if updated_service!=pending_service_req[1]:
+            return ValueError(f'Cannot confirm the update of {service_name}. Previous requested service parameters were different than current ones')
+
+        if not self.is_within_allowed_confirmation_time(request_time=pending_service_req[2]):
+            return ConfirmationError(f'Too late to confirm. Confirmation must be done within {self.max_confirmation_minutes} minutes after the original request')
+        is_updated = self.policy_manager.update_service(**updated_service.__dict__)
+        if is_updated is not False:
+            self.__pending_services_requests__.pop(service_name)
+        return is_updated 
+        
+        
+    def confirm_remove_service(self, service_name: str):
+        pending_service_req = self.__pending_services_requests__.get(service_name, None)
+        if not pending_service_req or pending_service_req[0]!='remove':
+            return ValueError(f'Cannot confirm removal of {service_name}. No previous remove request')
+            
+        """
+        service_to_remove = Service(**self.__validate_missing_service_params__(service_name=service_name, price=price, minutes_duration=minutes_duration, description=description))
+        if service_to_remove!=pending_service_req[1]:
+            return ValueError('Cannot confirm remove.')
+        """
+        if not self.is_within_allowed_confirmation_time(request_time=pending_service_req[2]):
+            return ConfirmationError(f'Too late to confirm. Confirmation must be done within {self.max_confirmation_minutes} minutes after the original request')
+        is_deleted = self.policy_manager.remove_service(service_name)
+        if is_deleted is not False:
+            self.__pending_services_requests__.pop(service_name)
+        return is_deleted

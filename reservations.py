@@ -40,7 +40,7 @@ class Reservation:
     def __eq__(self, other):
         if not isinstance(other, Reservation):
             return False
-        return not any(getattr(self, attribute)!=getattr(other, attribute) for attribute in ['reservation_id', 'user', 'service_name', 'start_time', 'end_time', 'timestamp'])
+        return all(getattr(self, attribute)==getattr(other, attribute) for attribute in ['reservation_id', 'user', 'service_name', 'start_time', 'end_time', 'timestamp'])
 
 
 class ReservationManager:
