@@ -1,9 +1,7 @@
 # Keep the repository focused on source code only.
 *
 
-.gitignore
-Dockerfile
-.dockerignore
+
 !requirements.txt
 !src/
 !src/**
@@ -30,3 +28,8 @@ __pycache__/
 .venv/
 venv/
 env/
+
+#
+.gitignore
+Dockerfile
+.dockerignore
