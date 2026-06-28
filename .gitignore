@@ -1,4 +1,5 @@
 # Keep the repository focused on source code only.
+.gitignore
 *
 
 
@@ -30,6 +31,5 @@ venv/
 env/
 
 #
-.gitignore
 Dockerfile
-dockerignore
+.dockerignore
