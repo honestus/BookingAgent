@@ -2,6 +2,7 @@ from __future__ import annotations
 import sys
 sys.path.append("C:/Users/onest/Documents/data_analysis/booking_agent/src")
 
+import os
 import logging, time
 import asyncio
 import datetime as dt
@@ -147,7 +148,10 @@ async def main():
     Path(users_data_path).mkdir(exist_ok=True, parents=True)
     app_system = await initialize_application_orchestrator()
     
-    tok_id = "8379699604:AAEkSDtpy8F89OsgIhpLf2_bAZbzSfvnD28"
+    tok_id = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not tok_id:
+        raise RuntimeError("Missing required environment variable: TELEGRAM_BOT_TOKEN")
+
     application = ApplicationBuilder().token(tok_id).build()   
     mimick_processing_handler = MessageHandler(telegram_filters.TEXT, on_message)
     application.add_handler(mimick_processing_handler)

@@ -1,0 +1,7 @@
+aiofiles
+filelock
+google-genai
+huggingface-hub
+python-dotenv
+python-telegram-bot
+PyYAML
