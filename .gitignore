@@ -1,9 +1,9 @@
 # Keep the repository focused on source code only.
 *
 
-!.gitignore
-!Dockerfile
-!.dockerignore
+.gitignore
+Dockerfile
+.dockerignore
 !requirements.txt
 !src/
 !src/**
