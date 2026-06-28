@@ -30,6 +30,6 @@ venv/
 env/
 
 #
-.gitignore
-Dockerfile
-.dockerignore
+*.gitignore
+*Dockerfile
+*.dockerignore
