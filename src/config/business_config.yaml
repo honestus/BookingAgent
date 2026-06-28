@@ -1,0 +1,41 @@
+business:
+  name: "My Barber Shop"
+
+calendar:
+  generation_mode: rolling_days
+  future_days: 30
+
+  # alternativa futura:
+  # generation_mode: fixed_range
+  # start_date: "2026-05-01"
+  # end_date: "2026-06-30"
+
+  slot_minutes_duration: 5
+
+opening_hours:
+    - ["09:00", "13:00"]
+    - ["15:00", "20:00"]
+
+services:
+  - name: "HAIRCUT"
+    price: 18
+    duration_minutes: 30
+    description: "Taglio classico uomo"
+
+  - name: "BARBERCUT"
+    price: 10
+    duration_minutes: 20
+    description: "Regolazione e rifinitura barba"
+
+  - name: "HAIR_AND_BARBER"
+    price: 25
+    duration_minutes: 45
+    description: "Pacchetto completo"
+
+policies:
+  min_advance_booking_minutes: 30
+  min_advance_cancelation_minutes: 120
+  max_confirmation_minutes: 15
+
+booking:
+  default_grid_minutes: 15

@@ -1,48 +1,63 @@
-import math, warnings, copy, threading, datetime
+import math, warnings, copy, asyncio, datetime
 from datetime import timedelta
-from booking_errors import AlreadyBookedError
+from backend.domain_errors import AlreadyBookedError
+from utils.datetimes_utils import minutes_between
+from enum import Enum
+
+
+class AlignMethod:
+    PREVIOUS = 'prev'
+    NEXT = 'next'
+
+
+
+
+
 class Slot:
-    def __init__(self, start_time: datetime, is_booked: bool = False):
+    def __init__(self, start_time: datetime.datetime, is_booked: bool = False, booking_expires_at: datetime.datetime = None):
         self.start_time = start_time  # datetime or "HH:MM" string
-        self.is_booked = is_booked
-        self._lock = threading.Lock()  # Only locks THIS slot
+        self._is_booked = is_booked
+        self._lock =  asyncio.Lock()  # Only locks THIS slot
+        self._booking_expires_at = booking_expires_at
         
     def __repr__(self):
-        status = "Booked" if self.is_booked else "Free"
+        status = "Booked" if self.is_booked() else "Free"
         return f"<Slot {self.start_time} - {status}>"
+        
+    def book(self, booking_expires_at: datetime.datetime = None):
+        self._is_booked = True
+        self._booking_expires_at = booking_expires_at
 
     def reset(self):
-        self.is_booked = False
+        self._is_booked = False
+        self._booking_expires_at = None
         return self
         
+        
     def copy(self):
-        slot = Slot(start_time=self.start_time, is_booked=self.is_booked)
+        slot = Slot(start_time=self.start_time, is_booked=self._is_booked, booking_expires_at=self._booking_expires_at)
         return slot
     
-    """
-    def to_dict(self):
-        return {
-            "start_time": self.start_time.isoformat(),  # store as ISO string
-            "is_booked": self.is_booked,
-            "service_type": self.service_type,
-            "booking_user": self.booking_user,
-            "booking_id": self.booking_id
-        }
+    
+    def is_booked(self):
+        self._clear()
+        return self._is_booked
 
-    @classmethod
-    def from_dict(cls, data):
-        slot = cls(datetime.fromisoformat(data["start_time"]))
-        slot.is_booked = data["is_booked"]
-        slot.service_type = data.get("service_type")
-        slot.booking_user = data.get("booking_user")
-        slot.booking_id = data.get("booking_id")
-        return slot
-"""
-
+    def _clear(self, curr_time: datetime.datetime = None):
+        if not self._booking_expires_at:
+            return
+        if curr_time is None:
+            curr_time = datetime.datetime.now(tz=getattr(self._booking_expires_at, 'tzinfo', None))
+        if curr_time>self._booking_expires_at:
+            self.reset()
+            
 
 
 class Segment:
-    def __init__(self, start_time, end_time, slot_duration=5, force_past_slots=True):
+    """
+    Segment is a collection of fixed duration' slots, ranging from start_time to end_time. 
+    """
+    def __init__(self, start_time: datetime.datetime, end_time: datetime.datetime, slot_duration: int = 5, force_past_slots: bool = True):
         if start_time>= end_time:
             raise ValueError('End time must be after start time')
         object.__setattr__(self, 'start_time', start_time)
@@ -57,14 +72,14 @@ class Segment:
         time_index_map = {slot.start_time:i for i,slot in enumerate(self.slots)}
         object.__setattr__(self, '__time_index_map__', time_index_map)
 
-    def get_slot(self, start_time, return_index=False):
+    def get_slot(self, start_time: datetime.datetime, return_index: bool = False):
         """Get a slot by datetime (O(1) lookup)."""
         idx = self.__time_index_map__.get(start_time)
         if idx is not None:
             return self.slots[idx] if not return_index else idx
         return None
 
-    def join(self, other_segment, copy=True):
+    def join(self, other_segment: "Segment", copy: bool = True):
         if other_segment.slot_duration!=self.slot_duration:
             raise ValueError('Cannot join segments with different slot durations')
         # Only allow joining if segments are exactly adjacent (no gap, no overlap)
@@ -85,20 +100,16 @@ class Segment:
             self = joined_segment
         return joined_segment
 
-    def get_slots_slice(self, start_time, end_time):
+    def get_slots_slice(self, start_time: datetime.datetime, end_time: datetime.datetime):
         if start_time>self.end_time or end_time<self.start_time:
             return []
-        # Find start index
-        if start_time in self.__time_index_map__:
-            start_idx = self.__time_index_map__[start_time]
-        else:
-            start_idx = bisect_left(self.slots, start_time, key=lambda s: s.start_time)
-        # Find end index (exclusive)
-        end_idx = bisect_left(self.slots, end_time, key=lambda s: s.start_time)
+            
+        start_idx = self.__time_index_map__[start_time] if start_time in self.__time_index_map__ else max(0, bisect_right(self.slots, start_time, key=lambda s: s.start_time)-1)
+        end_idx = self.__time_index_map__[end_time] if end_time in self.__time_index_map__ else bisect_left(self.slots, end_time, key=lambda s: s.start_time)
         
         return self.slots[start_idx:end_idx]
 
-    def get_subsegment(self, start_time, end_time):
+    def get_subsegment(self, start_time: datetime.datetime, end_time: datetime.datetime):
         if start_time < self.start_time or end_time > self.end_time:
             raise ValueError('cannot get a subsegment with hours out of the current segment')
         if start_time > self.end_time or end_time < self.start_time:
@@ -113,14 +124,39 @@ class Segment:
         subsegment._update_time_index_map()
         return subsegment
 
-    def minutes_mismatch_from_default(self, curr_datetime, default_minutes_grid_range=15):
+    def timedelta_mismatch_from_previous_default(self, datetime_obj: datetime.datetime, default_minutes_grid_range: int = None):
         """
-        Returns the mismatch of minutes from start of the day, by following default_minutes_grid_range.
-        I.E. curr_time = self.start_time + default_minutes_grid_range * k + minutes_mismatch. Returns minutes mismatch
+        Returns the mismatch from immediate previous slot.
         """
-        minutes_from_start = ((curr_datetime - curr_datetime.replace(hour=self.start_time.hour, minute=self.start_time.minute)).seconds / 60)
-        return int(minutes_from_start % default_minutes_grid_range)
+        if default_minutes_grid_range is None:
+            default_minutes_grid_range = self.slot_duration
         
+        default_seconds_grid = 60 * default_minutes_grid_range
+        time_from_start = (datetime_obj - self.start_time).total_seconds()
+        seconds_mismatch_from_default_slot = time_from_start % default_seconds_grid
+        return timedelta(seconds=seconds_mismatch_from_default_slot)
+        
+    def is_aligned_to_slots(self, datetime_obj: datetime.datetime):
+        return not bool(self.timedelta_mismatch_from_previous_default(datetime_obj))
+       
+    def align_to_slot(self, datetime_obj: datetime.datetime, how: AlignMethod):
+        datetime_obj = datetime_obj.astimezone(self.start_time.tzinfo)
+        if datetime_obj < self.start_time:
+            if how==AlignMethod.NEXT:
+                return self.start_time
+            return None
+        if datetime_obj > self.end_time:
+            if how==AlignMethod.PREVIOUS:
+                return self.end_time
+            return None
+        
+        curr_timedelta_mismatch = self.timedelta_mismatch_from_previous_default(datetime_obj)   
+        if not curr_timedelta_mismatch:
+            return datetime_obj
+            
+        prev_slot_dt = datetime_obj - curr_timedelta_mismatch
+        return prev_slot_dt if how==AlignMethod.PREVIOUS else prev_slot_dt + timedelta(minutes=self.slot_duration)
+    
     def copy(self):
         other = copy.copy(self)
         object.__setattr__(other, 'slots', [s.copy() for s in other.slots])
@@ -132,7 +168,7 @@ class Segment:
     def __setattr__(self, attribute, value):
         raise ValueError(f'Cannot set attribute {attribute}. It is final')
 
-    def __generate_slots__(self, force_past_slots=True):
+    def __generate_slots__(self, force_past_slots: bool = True):
         """ If force_past_slots is False, only generates slots from max(start_time, current_time + minimum_advance_booking_minutes) on. 
         If start_time < curr_time, sets self.start_time = curr_time. 
         """
@@ -143,7 +179,7 @@ class Segment:
         object.__setattr__(self, 'slots', [])
 
         if not force_past_slots:
-            curr_time = datetime.now()
+            curr_time = datetime.now(tz=self.end_time.tzinfo)
             if self.end_time < curr_time:
                 raise ValueError('Cannot generate on past timeframes')
 
@@ -171,14 +207,14 @@ class Segment:
 from bisect import bisect_left, bisect_right
 
 
-class BusinessCalendar():
-    def __init__(self, slot_minutes_duration=5):
+class BusinessCalendar:
+    def __init__(self, slot_minutes_duration: int = 5):
         self.slot_minutes_duration = slot_minutes_duration
         self.segments = []
         #self._update_time_index_map()
 
 
-    def add_segment(self, segment):
+    def add_segment(self, segment: Segment):
         idx = bisect_left(self.segments, segment.start_time, key=lambda x: x.start_time)
         # Check left neighbor no-overlaps
         prev_elem_to_del, follow_elem_to_del = False, False
@@ -210,12 +246,12 @@ class BusinessCalendar():
         self.segments.insert(idx, segment)
         return True
         
-    def add_new_segment(self, start_time, end_time, force_past_slots=True):
+    def add_new_segment(self, start_time: datetime.datetime, end_time: datetime.datetime, force_past_slots: bool = True):
         new_segment = Segment(start_time=start_time, end_time=end_time, slot_duration=self.slot_minutes_duration, force_past_slots=force_past_slots)
         return self.add_segment(new_segment)
 
 
-    def remove_segment(self, start_time, end_time, raise_error_if_any_booking=True):
+    def remove_segment(self, start_time: datetime.datetime, end_time: datetime.datetime, raise_error_if_any_booking: bool = True):
         if end_time<=self.segments[0].start_time or start_time >= self.segments[-1].end_time:
             return
         
@@ -227,7 +263,7 @@ class BusinessCalendar():
                 continue
             if raise_error_if_any_booking:
                 slots_to_remove = segment.get_slots_slice(start_time=start_time, end_time=end_time)
-                if any(s.is_booked for s in slots_to_remove):
+                if any(s.is_booked() for s in slots_to_remove):
                     raise ValueError(f'Cannot remove segments: they contain bookings.')
                     final_segments.append(segment) ## so far not working as we are raising error. But it may be a solution to keep whole segment whenever it contains reservations, and deleting only involved segments with no reservations...
                     warnings.warn(f'Cannot remove segment {segment}: contains bookings.')
@@ -244,7 +280,7 @@ class BusinessCalendar():
         return
    
 
-    def find_segment_by_start_time(self, start_time):
+    def find_segment_by_start_time(self, start_time: datetime.datetime):
         idx = bisect_left(self.segments, start_time, key=lambda s: s.start_time)
         # idx points to the first segment whose start_time >= target_start_time
         if idx < len(self.segments):
@@ -254,7 +290,7 @@ class BusinessCalendar():
         return None  # not found
     
 
-    def find_segment_containing(self, start_time, end_time, return_index=False):
+    def find_segment_containing(self, start_time: datetime.datetime, end_time: datetime.datetime, return_index: bool = False):
         if start_time > end_time:
             return None
         # Find the index of the first segment whose start_time is > start_time
@@ -265,22 +301,22 @@ class BusinessCalendar():
                 return matching_segment if not return_index else idx
         return None
 
-    def _get_segments_involved(self, start_time, end_time, return_index=False):
+    def _get_segments_involved(self, start_time: datetime.datetime, end_time: datetime.datetime, return_index: bool = False):
         first_segment_involved_idx = bisect_right(self.segments, start_time, key=lambda x:x.end_time)
         last_segment_involved_idx = bisect_left(self.segments, end_time, key=lambda x:x.start_time)
         if return_index:
             return first_segment_involved_idx, last_segment_involved_idx
         return self.segments[first_segment_involved_idx:last_segment_involved_idx]
         
-    def is_available_timeframe(self, start_time, end_time, as_int_error=False):
+    def is_available_timeframe(self, start_time: datetime.datetime, end_time: datetime.datetime, as_int_error: bool = False):
         segment = self.find_segment_containing(start_time, end_time)
         if not segment:
             return -1 if as_int_error else False
         needed_slots = segment.get_slots_slice(start_time=start_time, end_time=end_time)
-        return not any(slot.is_booked for slot in needed_slots)
+        return not any(slot.is_booked() for slot in needed_slots)
 
 
-    def get_slots(self, start_time, end_time, same_segment_only = False):
+    def get_slots(self, start_time: datetime.datetime, end_time: datetime.datetime, same_segment_only: bool = False):
         slots_found=[]
         if same_segment_only:
             matched_segment = self.find_segment_containing(start_time=start_time, end_time=end_time)
@@ -294,21 +330,15 @@ class BusinessCalendar():
                
         return slots_found
 
-    def get_available_booking_slots(self, minutes_duration, min_start_time, max_start_time=None, minutes_grid_span=15, split_by_segment=True):
+    def get_available_booking_slots(self, minutes_duration: int, min_start_time: datetime.datetime, max_start_time: datetime.datetime, minutes_grid_span: int = 15, split_by_segment: bool = True):
         """
         Returns all the slots groups which total duration is >= duration.
         I.e. returns the slots that have free time >= duration after its start_time
         start_time: filtering start_time - will only look for slots after it.
         end_time: filtering end_time - will only look for slots before it.
+        minutes_grid_span: will only return slots that start at segment.start_time + k * minutes_grid_span
         """
-        from datetimes_utils import validate_time
-        min_start_time = validate_time(min_start_time)
-        if max_start_time is None:
-            max_start_time = min_start_time + timedelta(days=7)
-        else:
-            max_start_time = validate_time(max_start_time)
-        if not min_start_time or not max_start_time:
-            raise TypeError('start_time must be a datetime object containing date, hours and minutes')
+        from utils.datetimes_utils import map_datetime_to_default
         if minutes_grid_span%self.slot_minutes_duration or minutes_grid_span<=0:
             raise ValueError(f'Grid span must be a multiple of {self.slot_minutes_duration}')
         if max_start_time<min_start_time:
@@ -316,21 +346,24 @@ class BusinessCalendar():
 
         n_slots_needed = math.ceil(minutes_duration / self.slot_minutes_duration)
         available_default_slots, available_special_slots = [], []
-
         segments_involved = self._get_segments_involved(start_time=min_start_time, end_time=max_start_time+timedelta(minutes=minutes_duration))
         for segment in segments_involved:
-            slot_list = segment.get_slots_slice(start_time=min_start_time, end_time=max_start_time + timedelta(minutes=minutes_duration))
+            aligned_min_start_time = segment.align_to_slot(min_start_time, how=AlignMethod.NEXT)
+            aligned_max_start_time = segment.align_to_slot(max_start_time, how=AlignMethod.PREVIOUS)
+            if aligned_min_start_time is None or aligned_max_start_time is None or aligned_min_start_time>aligned_max_start_time:
+                continue
+            slot_list = segment.get_slots_slice(start_time=aligned_min_start_time, end_time=aligned_max_start_time + timedelta(minutes=minutes_duration))
             segment_available_default_slots, segment_available_special_slots = [], []
             last_slot_booked = False
             for i in range(len(slot_list) - n_slots_needed + 1):
                 current_slot = slot_list[i]
                 current_slot_group = slot_list[i : i + n_slots_needed]
-                if not any(s.is_booked for s in current_slot_group): ###if the whole slots'group needed is available
-                    if not segment.minutes_mismatch_from_default(curr_datetime=current_slot.start_time, default_minutes_grid_range=minutes_grid_span):
+                if not any(s.is_booked() for s in current_slot_group): ###if the whole slots'group needed is available
+                    if not segment.timedelta_mismatch_from_previous_default(datetime_obj=current_slot.start_time, default_minutes_grid_range=minutes_grid_span):
                         segment_available_default_slots.append(current_slot) # Append current slot object to the default availabilities 
                     elif last_slot_booked:
                         segment_available_special_slots.append(current_slot)  ##appending current slot as special slot if it starts right after a previous reservation finished
-                last_slot_booked=current_slot.is_booked 
+                last_slot_booked=current_slot.is_booked() 
 
             available_default_slots.append(segment_available_default_slots)
             available_special_slots.append(segment_available_special_slots)
@@ -341,32 +374,65 @@ class BusinessCalendar():
         else:
             return list(zip(*[available_default_slots,available_special_slots]))
 
-    def _lock_slots(self, sorted_slots):
+    async def _lock_slots(self, sorted_slots: list[Slot]):
         """
-        Lock the given slots in a consistent order to avoid deadlocks.
+        Locks the given slots in a consistent order to avoid deadlocks.
         """
-        for slot in sorted_slots:
-            slot._lock.acquire()
-        return sorted_slots  # return locked slots so caller knows what’s locked
+        acquired = []
+        try:
+            for slot in sorted_slots:
+                await slot._lock.acquire()
+                acquired.append(slot)
+        except:
+            self._unlock_slots(acquired)
+            raise
+        return acquired
 
-    def _unlock_slots(self, sorted_slots):
+    def _unlock_slots(self, sorted_slots: list[Slot]):
         """
-        Release locks for the given slots.
+        Releases lock for the given slots.
         """
-        for slot in sorted_slots:
+        for slot in reversed(sorted_slots):
             slot._lock.release()
 
-    def reserve_slots(self, slots):
-        if any(slot.is_booked for slot in slots):
+    async def reserve_slots(self, slots, expiry_time=None):
+        locked_slots = await self._lock_slots(sorted(slots, key=lambda s: s.start_time))
+        try:
+            return self._reserve_slots_no_lock(locked_slots, expiry_time)
+        finally:
+            self._unlock_slots(locked_slots)
+            
+    async def free_slots(self, slots: list[Slot]):
+        locked_slots = await self._lock_slots(sorted(slots, key=lambda s: s.start_time))
+        try:
+            return self._free_slots_no_lock(locked_slots)
+        finally:
+            self._unlock_slots(locked_slots)
+    
+    async def _update_slots_expiry_time(self, slots: list[Slot], expiry_time):
+        locked_slots = await self._lock_slots(sorted(slots, key=lambda s: s.start_time))
+        try:
+            return self._set_slots_expiry_time_no_lock(locked_slots, expiry_time)
+        finally:
+            self._unlock_slots(locked_slots)
+        
+    def _reserve_slots_no_lock(self, slots: list[Slot], expiry_time: datetime.datetime=None):
+        if any(slot.is_booked() for slot in slots):
             raise AlreadyBookedError('Already booked')
         for slot in slots:
-            slot.is_booked=True
+            slot.book(expiry_time)
         return True
-    
 
-    def free_slots(self, slots):
+    def _free_slots_no_lock(self, slots: list[Slot]):
         for slot in slots:
             slot.reset()
+        return True
+        
+    def _set_slots_expiry_time_no_lock(self, slots: list[Slot], expiry_time):
+        if any(not s._is_booked for s in slots):
+            raise ValueError('cannot set expiry time on unbooked slots')
+        for slot in slots:
+            slot._booking_expires_at = expiry_time
         return True
 
     def copy(self):
@@ -379,12 +445,12 @@ class BusinessCalendar():
         Merge two BusinessCalendar into a new one.
         Raises OverlappingSegmentsError if any overlap is detected.
         """
-        def _append(sorted_segments, new_segment): ##appends by checking adjacency
+        def _append(sorted_segments: list[Segment], new_segment: Segment): ##appends by checking adjacency
             if len(sorted_segments) and new_segment.start_time == sorted_segments[-1].end_time: ## adjacent segment -> joining last_list_segment with current segment
                 sorted_segments[-1] = sorted_segments[-1].join(new_segment)
             else:
                 sorted_segments.append(new_segment)
-        def _extend(sorted_segments, new_segments): ##extends by checking adjacency
+        def _extend(sorted_segments: list[Segment], new_segments: list[Segment]): ##extends by checking adjacency
             i=0
             if len(sorted_segments) and new_segments[0].start_time == sorted_segments[-1].end_time: ## adjacent segment -> joining last_list_segment with current segment
                 sorted_segments[-1] = sorted_segments[-1].join(new_segments[0])

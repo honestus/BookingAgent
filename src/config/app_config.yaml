@@ -1,0 +1,7 @@
+storage:
+  users_msgs_dir: "data/users"
+  users_db_path: "data/users/users_db.json"
+  backend_system_path: "data/business_core.json"
+
+logging:
+  level: "INFO"

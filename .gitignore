@@ -1,0 +1,29 @@
+# Keep the repository focused on source code only.
+*
+
+!.gitignore
+!src/
+!src/**
+
+# Runtime/local data.
+src/data/
+src/test/
+
+# Unreferenced/deprecated source files.
+src/chat_system/shard_manager.py
+src/chat_system/telegram_bot_smart.py
+
+# Python/runtime noise.
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Local environments and secrets.
+.env
+.venv/
+venv/
+env/
