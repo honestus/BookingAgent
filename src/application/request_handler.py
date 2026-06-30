@@ -263,6 +263,9 @@ def _reconstruct_run_params(params: dict[str, Any], missing_params: list[str], m
         if not params:
             return
         """
+        params = dict(params) if params else {}
+        missing_params = list(missing_params) if missing_params else []
+        
         all_exposed_params_names_to_replace = []
         any_reconstruction_error: bool = False
         for exposed_param in method_exposed_params:

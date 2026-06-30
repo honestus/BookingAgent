@@ -106,13 +106,17 @@ def generate_calendar_segments(calendar_config, opening_hours):
 
     return segments
 
-_provider_to_model_type = {
-    "gemini": ModelType.GEMINI,
-    "huggingface": ModelType.HUGGINGFACE,
-}
+def _provider_to_model_type():
+    from llm_agent import ModelType
+    return {
+        "gemini": ModelType.GEMINI,
+        "huggingface": ModelType.HUGGINGFACE,
+    }
 
+_providers_types=None
 def build_llm_model(llm_config):
     from llm_agent import ModelType, LLMModel
+    global _providers_types
     
     def _resolve_api_key_value(api_keys_config, api_key):
         return api_keys_config.get(api_key, api_key)
@@ -136,8 +140,9 @@ def build_llm_model(llm_config):
         )
 
     
-
-    model_type = _provider_to_model_type[provider]
+    if not _providers_types:
+        _providers_types = _provider_to_model_type()
+    model_type = _providers_types[provider]
 
     return LLMModel(
         model_type=model_type,
