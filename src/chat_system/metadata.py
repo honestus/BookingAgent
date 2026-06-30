@@ -27,8 +27,17 @@ class RecoveryCheckpoint:
         self.last_checkpoint = kwargs.get('last_checkpoint', dt.datetime.now(dt.UTC))
         
     def update(self, last_handled_processing_update_id: int = None, last_handled_sending_response_id: int = None, last_messages_file: Path = None, last_processed_responses_file: Path = None, last_sent_responses_file: Path = None, files_containing_unprocessed_msgs_errors: set[Path] = None, files_containing_unsent_responses_errors: set[Path] = None):
-        for attr_name in ["last_messages_file", "last_processed_responses_file", "last_sent_responses_file", "last_handled_processing_update_id", "last_handled_sending_response_id", "files_containing_unprocessed_msgs_errors", "files_containing_unsent_responses_errors"]:
-            if (attr_value:=eval(attr_name)) is not None:
+        inputs = {
+            "last_messages_file": last_messages_file,
+            "last_processed_responses_file": last_processed_responses_file,
+            "last_sent_responses_file": last_sent_responses_file,
+            "last_handled_processing_update_id": last_handled_processing_update_id,
+            "last_handled_sending_response_id": last_handled_sending_response_id,
+            "files_containing_unprocessed_msgs_errors": files_containing_unprocessed_msgs_errors,
+            "files_containing_unsent_responses_errors": files_containing_unsent_responses_errors,
+        }
+        for attr_name, attr_value in inputs.items():
+            if attr_value is not None:
                 setattr(self, attr_name, RecoveryCheckpoint.validate_attribute(attr_name, attr_value))
         self.last_checkpoint = dt.datetime.now(dt.UTC)
         

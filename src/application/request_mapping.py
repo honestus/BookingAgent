@@ -167,6 +167,7 @@ def normalize_params_dict(params: dict[str, Any], params_types_defaults_dict: di
     
 def _cast_datetime_attribute(value):
     import datetime
+    from utils.cast_utils import cast_str_to_datetime
     if isinstance(value, str):
         try:
             value = cast_str_to_datetime(value)

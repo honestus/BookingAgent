@@ -10,10 +10,10 @@ from application.business_validator import Param
 
 class ParamExposure:
 
-    def expose(self, param) -> list["Param"]:
+    def expose(self, param) -> list[Param]:
         return [param]
 
-    def reconstruct(self, exposed_param: "ExposedParam", args_dict: dict[str, Any]) -> Any:
+    def reconstruct(self, exposed_param: ExposedParam, args_dict: dict[str, Any]) -> Any:
         param = exposed_param.param
         try:
             return args_dict[param.name]
@@ -27,7 +27,7 @@ class ParamExposure:
 
 class DateTimeExposure(ParamExposure):
 
-    def expose(self, param) -> list["Param"]:
+    def expose(self, param) -> list[Param]:
         if isinstance(param.default_value, dt.datetime):
             def_date, def_time = param.default_value.date(), param.default_value.time()
         else:
@@ -38,13 +38,13 @@ class DateTimeExposure(ParamExposure):
 
         return [date_param, time_param]
 
-    def reconstruct(self, exposed_param: "ExposedParam", args_dict: dict[str, Any]) -> dt.datetime:
+    def reconstruct(self, exposed_param: ExposedParam, args_dict: dict[str, Any]) -> dt.datetime:
         param = exposed_param.param
         date_param, time_param = exposed_param.exposed_params
         
         date_value = super().reconstruct(ExposedParam(date_param, get_param_exposure(date_param)), args_dict)
         time_value = super().reconstruct(ExposedParam(time_param, get_param_exposure(time_param)), args_dict)
-        if not param.required and date_value==param.default_value and time_value==param.default_value:
+        if ( (not param.required) and date_value==param.default_value and time_value==param.default_value):
             return param.default_value
         
         return dt.datetime.combine(date_value, time_value)

@@ -106,35 +106,38 @@ def generate_calendar_segments(calendar_config, opening_hours):
 
     return segments
 
+_provider_to_model_type = {
+    "gemini": ModelType.GEMINI,
+    "huggingface": ModelType.HUGGINGFACE,
+}
 
 def build_llm_model(llm_config):
     from llm_agent import ModelType, LLMModel
+    
+    def _resolve_api_key_value(api_keys_config, api_key):
+        return api_keys_config.get(api_key, api_key)
 
-    default_model_key = llm_config["default_model"]
+    api_keys = llm_config.get('api_keys', {})
+    models = llm_config.get('models', {})
 
-    model_cfg = llm_config["models"][default_model_key]
+    default_model = llm_config.get("default_model", "gemini_fast")
 
+    model_cfg = models[default_model]
     provider = model_cfg["provider"]
-    if 'api_key' in model_cfg:
-        api_key = model_cfg['api_key']
-    else:
-        api_key = llm_config.get('keys', {}).get(llm_config.get('default_key', ''))
-    print(api_key)
     model_name = model_cfg.get("model_name")
-
-    #api_key = os.getenv(api_key_env)
-
+    if 'api_key' in model_cfg:
+        api_key = _resolve_api_key_value(api_keys, model_cfg['api_key'])
+    else:
+        api_key = api_keys.get(model_cfg['provider'], '')
+    
     if not api_key:
         raise ValueError(
-            f"Missing environment variable: {api_key_env}"
+            f"Missing api_key from llm_config file"
         )
 
-    provider_to_enum = {
-        "gemini": ModelType.GEMINI,
-        "huggingface": ModelType.HUGGINGFACE,
-    }
+    
 
-    model_type = provider_to_enum[provider]
+    model_type = _provider_to_model_type[provider]
 
     return LLMModel(
         model_type=model_type,
@@ -278,7 +281,6 @@ async def initialize_application_orchestrator(load_if_existing: bool = True):
     
     all_successes = True
     for req in requests_to_execute:
-        print(req.method, req.params)
         try:
             outp = await orchestrator.request_handler._execute_request(req, replay_mode=True)
         except Exception as e:

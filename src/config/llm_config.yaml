@@ -1,29 +1,25 @@
-default_model: "gemini_fast"
-default_key: "your_gemini_api_key"
+default_model: gemini_fast
 
-keys:
-    your_gemini_api_key: ""
-    your_huggingface_api_key : ""
-
+api_keys:
+    gemini : '123' ##change these values with your actual api_key
+    gemini2: 'aa'
+    huggingface: 'bc'
 
 
 models:
-
   gemini_generic:
     provider: gemini
-    api_key: your_gemini_api_key
     
   gemini_fast:
     provider: gemini
     model_name: "gemini-2.5-flash"
-    api_key: your_gemini_api_key
+    api_key: gemini2
 
   gemini_pro:
     provider: gemini
     model_name: "gemini-2.5-pro"
-    api_key: your_gemini_api_key
+    api_key: '1234'
 
   hf_mistral:
     provider: huggingface
-    api_key: your_huggingface_api_key
     model_name: "mistralai/Mistral-7B-Instruct-v0.3"

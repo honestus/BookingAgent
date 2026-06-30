@@ -229,7 +229,7 @@ class BusinessCore:
         if not remove_doable:
             raise obj
         self.policy_manager.remove_service(service_name=obj.old.service_name)
-        return BusinessEvent(ServiceEventType.DELETED, data=BusinessEvent.EventData(old=service), actor=actor)
+        return BusinessEvent(ServiceEventType.DELETED, data=BusinessEvent.EventData(old=obj.old), actor=actor)
 
 
     def get_available_services(self, actor: UserRole = UserRole.USER) -> list[Service]:
@@ -436,8 +436,10 @@ class BusinessCore:
             final_dct['minutes_duration']=minutes_duration or self._get_duration_from_service_name(service_name)
         else:
             final_dct['minutes_duration']=minutes_duration or (self._get_duration_from_service_name(service_name) if service_name is not None else minutes_between(existing_reservation.start_time, existing_reservation.end_time) )
-            for attr in ['user', 'start_time', 'service_name']:
-                final_dct[attr] = v if (v:=eval(attr)) is not None else getattr(existing_reservation, attr)            
+            inputs = {'user': user, 'start_time': start_time, 'service_name': service_name}
+            for attr in inputs:
+                final_dct[attr] = inputs[attr] if inputs[attr] is not None else getattr(existing_reservation, attr)
+                      
         return final_dct
         
     @staticmethod
@@ -869,8 +871,8 @@ class BusinessCoreWithConfirmation(BusinessCore):
         can_confirm, error, pending_service = self._validate_existing_service_pending_op(service_name=service_name, operation=BusinessOperation.UPDATE)
         if not can_confirm:
             if isinstance(error, ExpiryError):
-                e.events = [self._remove_pending_service_req(service_name, BusinessOperation.UPDATE, actor=UserRole.SYSTEM)]
-            raise e
+                error.events = [self._remove_pending_service_req(service_name, BusinessOperation.UPDATE, actor=UserRole.SYSTEM)]
+            raise error
             
         events = []
         update_result = self.policy_manager.update_service(**pending_service.__dict__)

@@ -85,7 +85,7 @@ class RequestHandler:
     def __init__(self, business_manager: BookingService):
         self.business_manager = business_manager
         self._business_validator = BusinessValidator(business_manager)
-        self.__build_cached_exposed_params__()
+        self._build_cached_exposed_params()
 
         # injection policy setup
         self.injection_policy = InjectionPolicy([UserInjectionRule(), ActorInjectionRule(), ForceGridRule()])
@@ -105,14 +105,14 @@ class RequestHandler:
                 method_whole_name = self._methods_names_mapping_by_role[user_role][request_dict[globals_shared.METHOD_ATTRIBUTE]]
                 validated_request_dict[globals_shared.METHOD_ATTRIBUTE]=method_whole_name
                 
-                all_method_params = self._business_validator.get_method_params(method_whole_name)
-                all_methods_params_names = [p.name for p in all_method_params]
+                method_params = self._business_validator.get_method_params(method_whole_name)
+                method_params_names = [p.name for p in method_params]
                 
                 method_exposed_params = self._exposed_methods_params_by_role[user_role][0][method_whole_name]
                 allowed_params = flatten([p.exposed_params for p in method_exposed_params])
                 allowed_params_names = [p.name for p in allowed_params]
                 
-                extra_unknown_params = [p for p in request_dict[globals_shared.PARAMS_ATTRIBUTE].keys() if p not in set(allowed_params_names+all_methods_params_names)]
+                extra_unknown_params = [p for p in request_dict[globals_shared.PARAMS_ATTRIBUTE].keys() if p not in set(allowed_params_names+method_params_names)]
                 if extra_unknown_params:
                     if raise_error:
                         raise ValueError(f'Unknown parameters: {extra_unknown_params} for method {request_dict[globals_shared.METHOD_ATTRIBUTE]}')
@@ -154,7 +154,8 @@ class RequestHandler:
     def _build_executable_request(self, request: StructuredRequest) -> StructuredRequest:
         import datetime as dt            
         exec_req = request.copy()
-        ### REMAPPING EXPOSED_PARAMS -> RUN_PARAMS
+        ## REMAPPING EXPOSED_METHOD_NAME -> WHOLE_METHOD_NAME
+        ## REMAPPING EXPOSED_PARAMS -> RUN_PARAMS
         if exec_req.params:
             method_whole_name = self._methods_names_mapping_by_role[exec_req.user.user_role].get(exec_req.method, exec_req.method)
             updated_params_dict = _reconstruct_run_params(params=exec_req.params, missing_params=exec_req.missing_params, method_exposed_params=self._exposed_methods_params_by_role[exec_req.user.user_role][0][method_whole_name])
@@ -229,7 +230,7 @@ class RequestHandler:
         return input_params|injected_params
         
         
-    def __build_cached_exposed_params__(self):
+    def _build_cached_exposed_params(self):
         from application.business_methods_exposure import map_param_to_exposed_param
         from application.business_validator import stringify_methods_params, Method
         #from application.business_methods_exposure import ExposedParam
